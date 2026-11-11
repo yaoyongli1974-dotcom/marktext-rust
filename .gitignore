@@ -1,0 +1,10 @@
+target/
+**/*.rs.bk
+*.pdb
+
+# The scratch directory holds the reference sources of the specification
+# suites and the notes of the development; it is not part of the sources.
+.tmp/
+
+# The notes of the assistant about the project stay on this machine.
+.workbuddy/

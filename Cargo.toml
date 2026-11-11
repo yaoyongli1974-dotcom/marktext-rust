@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/marktext-core",
+    "crates/marktext-cli",
+    "crates/marktext-app",
+    "tools/dlltool-proxy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/marktext/marktext"
+description = "Rust port of the MarkText markdown editor engine"
+
+[workspace.dependencies]
+marktext-core = { path = "crates/marktext-core", version = "0.1.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

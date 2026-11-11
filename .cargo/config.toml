@@ -1,0 +1,13 @@
+# Windows GNU 工具链缺少 GNU 汇编器 as.exe，导致 windows-link 的 raw-dylib
+# 导入库无法生成（windows-sys / windows-result / parking_lot_core 等全部报错）。
+# 本仓库自带 tools/dlltool-proxy，把 rustc 的 dlltool 调用转交给 rustup 分发的
+# rust-lld.exe（lld-link 模式），无需外部下载。
+#
+# dlltool 以「裸程序名」方式给出，由 PATH 解析 —— cargo 会以各 package 目录
+# 作为 rustc 的工作目录，任何相对路径都无法在所有成员间通用。
+# 代理需先安装到 PATH 中（scripts/build.ps1 一键完成）：
+#     cargo build -p dlltool-proxy
+#     copy target\debug\dlltool-proxy.exe %USERPROFILE%\.cargo\bin\
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "dlltool=dlltool-proxy.exe"]

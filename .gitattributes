@@ -1,0 +1,8 @@
+# The sources are stored with Unix line endings, so that the differences of
+# the repository do not depend on the platform that checks it out.
+* text=auto eol=lf
+
+# The Windows build helpers are run by PowerShell, which reads the CRLF
+# line endings.
+*.ps1 text eol=crlf
+*.bat text eol=crlf

@@ -1,0 +1,22 @@
+[package]
+name = "marktext-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Desktop markdown editor built on the MarkText Rust engine"
+
+[[bin]]
+name = "marktext-app"
+path = "src/main.rs"
+# The desktop app is a GUI binary: its test harness would try to bring up a
+# window, so it carries no unit tests.
+test = false
+bench = false
+
+[dependencies]
+eframe = "0.32.3"
+egui = "0.32.3"
+marktext-core = { workspace = true }
+rfd = "0.17.2"

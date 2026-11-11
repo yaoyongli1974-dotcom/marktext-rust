@@ -1,0 +1,5 @@
+{
+  "_comment": "Spec examples that the Rust engine fails. Listed example numbers are asserted to STILL fail by tests/spec.rs — if an example here starts passing, the suite reports an \"unexpected pass\" and the entry must be removed. Compliance can only go up.",
+  "commonmark": [],
+  "gfm": [398, 426, 434, 435, 436, 473, 474, 475, 477]
+}

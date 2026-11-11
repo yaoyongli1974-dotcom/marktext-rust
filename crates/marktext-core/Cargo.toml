@@ -1,0 +1,16 @@
+[package]
+name = "marktext-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Markdown engine core: block/inline parsing, lossless serialization, HTML rendering"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+regex = "1"
+serde_json = "1"

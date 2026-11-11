@@ -1,0 +1,11 @@
+[package]
+name = "dlltool-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "把 rustc 的 GNU dlltool 调用转交给 rustup 自带的 lld-link（rust-gnu 工具链缺少 GNU as.exe 的替代方案）"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "dlltool-proxy"
+path = "src/main.rs"
