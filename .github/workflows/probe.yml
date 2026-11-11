@@ -1,0 +1,45 @@
+name: 探针
+
+# 用来摸清 runner 的网络与预装库情况，跑一次几十秒就出结果。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: 探测
+    runs-on: ubuntu-22.04
+    steps:
+      - name: DNS
+        run: |
+          echo "=== DNS ==="
+          for host in archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com \
+                      mirror.gcr.com mirrors.edge.kernel.org mirrors.aliyun.com \
+                      crates.io static.crates.io github.com objects.githubusercontent.com \
+                      index.crates.io; do
+            if getent hosts "$host" >/dev/null 2>&1; then
+              echo "  通    $host"
+            else
+              echo "  不通  $host"
+            fi
+          done
+
+      - name: 预装库
+        run: |
+          echo "=== 运行时库 ==="
+          ls /usr/lib/x86_64-linux-gnu/ 2>/dev/null \
+            | grep -E "^lib(GL|EGL|GLX|OpenGL|X11|xcb|xkbcommon|wayland|ssl)\." | head -30
+          echo "=== 开发包 ==="
+          ls /usr/include/GL /usr/include/EGL /usr/include/X11 /usr/include/xkbcommon 2>&1 | head -5
+          echo "=== 工具 ==="
+          for t in pkg-config cc gcc cmake python3 curl wget; do
+            printf '  %-12s %s\n' "$t" "$(command -v $t || echo 缺)"
+          done
+
+      - name: 源文件
+        run: |
+          echo "=== apt 源 ==="
+          cat /etc/apt/sources.list 2>/dev/null | grep -v '^#' | grep -v '^$' | head -10
+          echo "--- deb822 ---"
+          cat /etc/apt/sources.list.d/*.sources 2>/dev/null | head -20
+          echo "=== apt 镜像候选 ==="
+          cat /etc/apt/apt-mirrors.txt 2>/dev/null | head -10
