@@ -32,11 +32,14 @@ jobs:
             binaries: 'marktext marktext-app'
           # musl 静态版只带命令行工具 —— 它没有系统依赖，放在任何发行版上都能跑。
           # GUI 依赖 OpenGL/Wayland，静态链接它们没有意义，因此不构建。
+          # optional 标记让它失败时不阻断发布：静态版是加分项，
+          # 不该因为它把整个 release 拖掉。
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             asset: marktext-x86_64-unknown-linux-musl
             crates: 'marktext-cli'
             binaries: 'marktext'
+            optional: true
           # Windows 用 MSVC 工具链：raw-dylib 导入库由 rustc 自带的
           # llvm-dlltool 生成，不需要 GNU 汇编器，也就不需要 dlltool 代理。
           - os: windows-latest
@@ -89,9 +92,23 @@ jobs:
           echo "=== 直接进入构建 ==="
           true
 
-      - name: 安装 musl 工具链
+      - name: 准备 musl 链接环境
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get install -y --no-install-recommends musl-tools musl-dev
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # Rust 的 musl 目标自带 libc.a 与 crt*.o（self-contained 链接），
+          # 所以 musl-tools 并不是必需的 —— 探针工作流实测过：不装它
+          # 也能链接出静态二进制。而 runner 上的 apt 源解析不了
+          # archive.ubuntu.com，装 musl-tools 反而会把构建拖死。
+          SYSROOT=$(rustc --print sysroot)
+          SC="$SYSROOT/lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained"
+          echo "=== 自带的链接对象 ==="
+          ls "$SC" 2>&1 | head -20 || true
+          echo "=== 编译器 ==="
+          command -v cc gcc 2>&1 || true
+          true
 
       - name: 构建 release
         shell: bash
@@ -140,6 +157,9 @@ jobs:
   release:
     name: 创建 GitHub Release
     needs: build
+    # always() ：某条构建腿失败也要把已有的产物发出去。
+    # musl 那条腿是可选的（optional），它挂了不该让整个发布泡汤。
+    if: always()
     runs-on: ubuntu-latest
     steps:
       # `gh release create` wants a repository to work in, so the sources
@@ -158,25 +178,48 @@ jobs:
       - name: 生成校验和
         run: |
           cd artifacts
-          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          # 某个扩展名可能一个文件都没有（比如 musl 那条腿挂了），
+          # 所以逐个扩展名单独处理，缺哪个都不该让步骤失败。
+          shopt -s nullglob
+          FILES=(*.tar.gz *.zip)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "没有产物可校验"
+            exit 1
+          fi
+          sha256sum "${FILES[@]}" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: 生成发布说明
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          cat > release-notes.md <<'EOF'
+          # 产物表格按实际下载到的文件生成：某条构建腿失败时，
+          # 说明里不该列出不存在的产物。
+          {
+            echo "| 平台 | 文件 | 说明 |"
+            echo "| :--- | :--- | :--- |"
+            if [ -f artifacts/marktext-x86_64-unknown-linux-gnu.tar.gz ]; then
+              echo "| Linux x86_64 (glibc) | \`marktext-x86_64-unknown-linux-gnu.tar.gz\` | \`marktext\`（命令行）+ \`marktext-app\`（桌面应用） |"
+            fi
+            if [ -f artifacts/marktext-x86_64-unknown-linux-musl.tar.gz ]; then
+              echo "| Linux x86_64 (静态) | \`marktext-x86_64-unknown-linux-musl.tar.gz\` | \`marktext\` 静态链接，无系统依赖 |"
+            fi
+            if [ -f artifacts/marktext-x86_64-pc-windows-msvc.zip ]; then
+              echo "| Windows x86_64 | \`marktext-x86_64-pc-windows-msvc.zip\` | \`marktext.exe\`（命令行）+ \`marktext-app.exe\`（桌面应用） |"
+            fi
+          } > artifacts-table.md
+
+          {
+            cat <<'EOF'
           ## MarkText Rust 引擎
 
           MarkText（`packages/muya`）核心编辑引擎的 Rust 移植，逐条复刻原版的解析与序列化契约。
 
           ### 产物
 
-          | 平台 | 文件 | 说明 |
-          | :--- | :--- | :--- |
-          | Linux x86_64 (glibc) | `marktext-x86_64-unknown-linux-gnu.tar.gz` | `marktext`（命令行）+ `marktext-app`（桌面应用） |
-          | Linux x86_64 (静态) | `marktext-x86_64-unknown-linux-musl.tar.gz` | `marktext` 静态链接，无系统依赖 |
-          | Windows x86_64 | `marktext-x86_64-pc-windows-msvc.zip` | `marktext.exe`（命令行）+ `marktext-app.exe`（桌面应用） |
+          EOF
+            cat artifacts-table.md
+            cat <<'EOF'
 
           每个压缩包都带 `README.md`、`LICENSE`、`NOTICE.md`。
 
@@ -204,6 +247,7 @@ jobs:
           sha256sum -c SHA256SUMS.txt
           ```
           EOF
+          } > release-notes.md
 
           # The notes of the released version are taken from the changelog,
           # so that they do not have to be written twice.
@@ -231,13 +275,24 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
+          # 只上传真实存在的产物：某条构建腿失败时，glob 展开会带上
+          # 字面量而让 gh 报错。
+          shopt -s nullglob
+          ASSETS=(artifacts/*.tar.gz artifacts/*.zip artifacts/SHA256SUMS.txt)
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "没有任何产物，跳过发布"
+            exit 1
+          fi
+          echo "上传 ${#ASSETS[@]} 个文件："
+          printf '  %s\n' "${ASSETS[@]}"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" artifacts/* --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
             gh release edit "$TAG" --notes-file release-notes.md --title "MarkText Rust 引擎 $TAG"
           else
             # The tag is pushed by the trigger itself, so the release points
             # at it as it is; no target has to be given.
-            gh release create "$TAG" artifacts/* \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --notes-file release-notes.md \
               --title "MarkText Rust 引擎 $TAG" \
               --verify-tag
