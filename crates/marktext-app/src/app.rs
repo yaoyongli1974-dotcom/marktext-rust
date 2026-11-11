@@ -123,6 +123,11 @@ impl MarkTextApp {
         }
     }
 
+    /// The line the cursor is on, counted from one.
+    pub fn cursor_line(&self) -> usize {
+        self.cursor_line
+    }
+
     /// Load a file into the application.
     pub fn open_path(&mut self, path: &Path) {
         match std::fs::read_to_string(path) {
@@ -258,6 +263,12 @@ fn apply_theme(ctx: &Context, theme: Theme) {
     } else {
         egui::Theme::Light
     });
+}
+
+impl Default for MarkTextApp {
+    fn default() -> MarkTextApp {
+        MarkTextApp::new()
+    }
 }
 
 impl MarkTextApp {
@@ -502,11 +513,7 @@ impl MarkTextApp {
             self.reparse();
         }
         if let Some(range) = output.cursor_range {
-            let index = range.primary.index;
-            self.cursor_line = self.source[..index.min(self.source.len())]
-                .matches('\n')
-                .count()
-                + 1;
+            self.cursor_line = crate::line_of_cursor(&self.source, range.primary.index);
         }
         let _ = palette;
     }

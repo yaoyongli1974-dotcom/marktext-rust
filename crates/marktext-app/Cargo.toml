@@ -7,11 +7,16 @@ license.workspace = true
 repository.workspace = true
 description = "Desktop markdown editor built on the MarkText Rust engine"
 
+[lib]
+name = "marktext_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "marktext-app"
 path = "src/main.rs"
 # The desktop app is a GUI binary: its test harness would try to bring up a
-# window, so it carries no unit tests.
+# window, so it carries no unit tests. The logic that can be tested lives in
+# the library instead.
 test = false
 bench = false
 

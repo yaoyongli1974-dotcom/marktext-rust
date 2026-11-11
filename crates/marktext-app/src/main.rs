@@ -6,16 +6,17 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod preview;
-mod theme;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use app::{MarkTextApp, APP_NAME};
+use marktext_app::app::{MarkTextApp, APP_NAME};
 
 fn main() -> ExitCode {
+    // A panic must never take the window down silently. The release build on
+    // Windows runs without a console, so the panic hook is the only place
+    // where the user can be told what went wrong.
+    install_panic_hook();
+
     // The first argument is the file to open, the same way the original
     // accepts a path on the command line.
     let path = std::env::args_os()
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
         APP_NAME,
         native_options,
         Box::new(move |cc| {
-            theme::install_fonts(&cc.egui_ctx);
+            marktext_app::theme::install_fonts(&cc.egui_ctx);
             let mut app = MarkTextApp::new();
             if let Some(path) = path {
                 app.open_path(&path);
@@ -69,4 +70,34 @@ fn report_failure(message: &str) {
         .set_description(message)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
+}
+
+/// Report a panic before the process dies.
+///
+/// The release build is compiled with `panic = "abort"`, so the process ends
+/// right after the hook returns. Without a hook the user would only see the
+/// window vanish, with no hint of what went wrong.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |info| {
+        let message = panic_message(info);
+
+        // The original hook writes the message and the backtrace to stderr.
+        previous(info);
+
+        report_failure(&message);
+    }));
+}
+
+/// The text of a panic, without the location noise.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "内部错误".to_string()
+    }
 }

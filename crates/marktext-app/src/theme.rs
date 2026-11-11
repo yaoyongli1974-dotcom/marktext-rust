@@ -92,6 +92,7 @@ impl Theme {
 
 /// The system fonts the app asks the operating system for.
 ///
+/// Every entry is a pair of the file to read and the name to show for it.
 /// The list is tried in order and the first one that exists is used. On
 /// Windows the Chinese fonts are shipped with the system, so a Chinese
 /// document renders correctly without any extra download.
@@ -126,50 +127,76 @@ const MONOSPACE_CANDIDATES: &[(&str, &str)] = &[
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
-    if let Some((name, path)) = first_existing(SYSTEM_FONT_CANDIDATES) {
-        if let Some(data) = read_font(path) {
+    match load_first(SYSTEM_FONT_CANDIDATES) {
+        Some((name, data)) => {
             fonts
                 .font_data
-                .insert(name.to_string(), Arc::new(FontData::from_owned(data)));
+                .insert(name.clone(), Arc::new(FontData::from_owned(data)));
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
                 if let Some(list) = fonts.families.get_mut(&family) {
-                    list.push(name.to_string());
+                    list.push(name.clone());
                 }
             }
         }
-    }
-
-    if let Some((name, path)) = first_existing(MONOSPACE_CANDIDATES) {
-        if let Some(data) = read_font(path) {
-            let tweaked = FontData::from_owned(data).tweak(FontTweak {
-                scale: 1.0,
-                // A monospace font sits a little lower than a proportional
-                // one, so it is nudged down to line up with the body text.
-                y_offset_factor: 0.0,
-                y_offset: 0.0,
-                baseline_offset_factor: 0.0,
-            });
-            fonts.font_data.insert(name.to_string(), Arc::new(tweaked));
-            if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
-                list.insert(0, name.to_string());
-            }
+        None => {
+            log("字体：没有找到任何可用的中文字体，中文将显示为方框");
         }
     }
+
+    if let Some((name, data)) = load_first(MONOSPACE_CANDIDATES) {
+        let tweaked = FontData::from_owned(data).tweak(FontTweak {
+            scale: 1.0,
+            // A monospace font sits a little lower than a proportional one,
+            // so it is nudged down to line up with the body text.
+            y_offset_factor: 0.0,
+            y_offset: 0.0,
+            baseline_offset_factor: 0.0,
+        });
+        fonts.font_data.insert(name.clone(), Arc::new(tweaked));
+        if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
+            list.insert(0, name);
+        }
+    }
+
+    log(&format!(
+        "字体：Proportional 族 = {:?}",
+        fonts.families.get(&FontFamily::Proportional)
+    ));
 
     ctx.set_fonts(fonts);
 }
 
-/// The first candidate path that exists on disk.
-fn first_existing<'a>(candidates: &'a [(&'a str, &'a str)]) -> Option<(&'a str, &'a str)> {
-    candidates
-        .iter()
-        .find(|(path, _)| std::path::Path::new(path).exists())
-        .copied()
+/// Load the first candidate that exists on disk and can be read.
+///
+/// The result holds the name of the font and its bytes.
+fn load_first(candidates: &[(&str, &str)]) -> Option<(String, Vec<u8>)> {
+    for (path, name) in candidates {
+        let path = std::path::Path::new(path);
+        if !path.is_file() {
+            continue;
+        }
+        match std::fs::read(path) {
+            Ok(data) => {
+                log(&format!("字体：已装载 {name}（{}）", path.display()));
+                return Some(((*name).to_string(), data));
+            }
+            Err(error) => {
+                log(&format!("字体：读取 {} 失败 —— {error}", path.display()));
+            }
+        }
+    }
+    None
 }
 
-/// Read a font file, ignoring a file that cannot be read.
-fn read_font(path: &str) -> Option<Vec<u8>> {
-    std::fs::read(path).ok()
+/// Write a diagnostic message.
+///
+/// The release build on Windows has no console window, so the messages are
+/// only useful while developing; they are dropped from the release build.
+fn log(message: &str) {
+    #[cfg(debug_assertions)]
+    eprintln!("{message}");
+    #[cfg(not(debug_assertions))]
+    let _ = message;
 }
 
 /// The font id used for the body text.
