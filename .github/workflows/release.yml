@@ -124,6 +124,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # `gh release create` wants a repository to work in, so the sources
+      # have to be checked out even though this job only uploads artefacts.
+      - uses: actions/checkout@v4
+
       - name: 下载全部产物
         uses: actions/download-artifact@v4
         with:
@@ -192,9 +196,11 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
             gh release edit "$TAG" --notes-file release-notes.md --title "MarkText Rust 引擎 $TAG"
           else
+            # The tag is pushed by the trigger itself, so the release points
+            # at it as it is; no target has to be given.
             gh release create "$TAG" artifacts/* \
               --notes-file release-notes.md \
               --title "MarkText Rust 引擎 $TAG" \
-              --target "${GITHUB_SHA}"
+              --verify-tag
           fi
           gh release view "$TAG"
