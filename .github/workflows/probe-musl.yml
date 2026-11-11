@@ -1,0 +1,43 @@
+name: musl 探针
+
+# 只为回答一个问题：musl 静态链接到底还需不需要 musl-tools。
+# Rust 的 musl 目标自带 libc.a 与 crt*.o（self-contained 链接），
+# 如果自带对象够用，就能完全绕开 runner 上解析不了的 apt 源。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: 试链接
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: 查自带链接对象
+        shell: bash
+        run: |
+          SYSROOT=$(rustc --print sysroot)
+          DIR="$SYSROOT/lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained"
+          echo "=== self-contained 目录 ==="
+          ls -la "$DIR" 2>&1 | head -20 || true
+          echo "=== 编译器 ==="
+          command -v cc gcc 2>&1 || true
+          echo "=== rustc 用了哪个链接器 ==="
+          rustc --print target-spec-json --target x86_64-unknown-linux-musl 2>/dev/null \
+            | grep -iE '"linker"|"link-self-contained"|"crt-static' || true
+          true
+
+      - name: 直接构建（不装 musl-tools）
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo build --release --target x86_64-unknown-linux-musl -p marktext-cli 2>&1 \
+            | tail -40
+          echo "=== 退出码 ${PIPESTATUS[0]} ==="
+          ls -la target/x86_64-unknown-linux-musl/release/marktext 2>&1 || true
+          true
