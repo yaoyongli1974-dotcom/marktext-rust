@@ -44,15 +44,25 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          # GitHub 的 runner 偶尔解析不了 Ubuntu 官方域名（archive.ubuntu.com
-          # 等），而 GitHub 自己的域名却一切正常，于是 apt 装不上图形依赖，
-          # 整个构建就卡在这里。依次换几个镜像域名试试，总有一个能通。
+          # 先看看哪些域名能解析：runner 偶尔解析不了 Ubuntu 官方域名，
+          # 而 GitHub 自己的域名却一切正常。
+          echo "=== DNS 诊断 ==="
+          for host in archive.ubuntu.com mirror.gcr.com mirrors.edge.kernel.org \
+                      security.ubuntu.com crates.io github.com; do
+            if getent hosts "$host" >/dev/null 2>&1; then
+              echo "  $host  能解析"
+            else
+              echo "  $host  解析不了"
+            fi
+          done
+
+          # 换几个镜像域名依次试，每个都有时间上限，免得卡在那里不动。
           set_mirror() {
             local base="$1"
-            local pattern='https?://(archive|security|azure\.archive|mirror\.gcr\.com|mirrors\.edge\.kernel\.org)[^ ]*/ubuntu/?'
             # 分隔符用 #：正则里有 | （ERE 的「或」），用 | 会撞上分隔符。
+            local pattern='https?://(archive|security|azure\.archive|mirror\.gcr\.com|mirrors\.edge\.kernel\.org)[^ ]*/ubuntu/?'
             sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list 2>/dev/null || true
             sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
           }
@@ -64,27 +74,25 @@ jobs:
             "http://azure.archive.ubuntu.com/ubuntu/"
           do
             set_mirror "$base"
-            for attempt in 1 2 3; do
-              if sudo apt-get update -o Acquire::Retries=3; then
-                updated=1
-                break 2
-              fi
-              echo "apt-get update 失败（${base}，第 ${attempt} 次），等 10 秒后重试"
-              sleep 10
-            done
+            if timeout 150 sudo apt-get update -o Acquire::Retries=2; then
+              updated=1
+              break
+            fi
             echo "镜像 ${base} 不通，换下一个"
           done
 
-          if [ "$updated" -ne 1 ]; then
-            echo "所有镜像都解析不了，无法安装依赖" >&2
-            exit 1
+          # 装不上也不阻断：winit 与 glutin 在 Linux 上是运行时动态加载的，
+          # 未必需要这些开发包。装不上就直接试着编译，让编译器说话。
+          if [ "$updated" -eq 1 ]; then
+            sudo apt-get install -y --no-install-recommends \
+              -o Acquire::Retries=3 \
+              libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
+              libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+              libwayland-dev libssl-dev pkg-config \
+              || echo "依赖没装上，接着试着编译"
+          else
+            echo "镜像源都解析不了，直接试着编译"
           fi
-
-          sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=5 \
-            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libwayland-dev libssl-dev pkg-config
 
       # The cargo invocations are written for bash on purpose: PowerShell 7.3
       # treats a bare `--` as the stop-parsing token and would swallow the
