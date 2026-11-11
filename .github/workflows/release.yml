@@ -66,63 +66,27 @@ jobs:
           key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: release-${{ matrix.target }}-
 
-      - name: 安装 Linux 图形依赖
+      - name: 准备 Linux 图形依赖
         if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: |
           set -uo pipefail
 
-          # 先看看哪些域名能解析：runner 偶尔解析不了 Ubuntu 官方域名，
-          # 而 GitHub 自己的域名却一切正常。
-          echo "=== DNS 诊断 ==="
-          for host in archive.ubuntu.com mirrors.edge.kernel.org mirrors.aliyun.com \
-                      crates.io github.com; do
-            if timeout 10 getent hosts "$host" >/dev/null 2>&1; then
-              echo "  $host  能解析"
-            else
-              echo "  $host  解析不了"
-            fi
+          # runner 解析不了 Ubuntu 官方域名（archive.ubuntu.com 等），
+          # 每次查询要等 20 秒才失败，apt 一轮下来能磨掉二十分钟。
+          # 但图形库其实不必装：winit 与 glutin 在 Linux 上是运行时动态加载
+          # 的，编译期不链接这些库，而 runner 镜像里运行时库本来就带着。
+          # 所以这里只做检查，不去装包 —— 真缺什么，编译器会明确报出来。
+          echo "=== 预装的图形库 ==="
+          ls /usr/lib/x86_64-linux-gnu/ 2>/dev/null \
+            | grep -E "^lib(GL|EGL|GLX|X11|xcb|xkbcommon|wayland)\." | head -20
+          echo "=== 头文件 ==="
+          ls -d /usr/include/GL /usr/include/EGL /usr/include/X11 /usr/include/xkbcommon 2>&1 | head -6
+          echo "=== 工具 ==="
+          for t in pkg-config cc gcc; do
+            printf '  %-12s %s\n' "$t" "$(command -v $t || echo 缺)"
           done
-
-          # 换几个镜像域名依次试，每个都有时间上限，免得卡在那里不动。
-          set_mirror() {
-            local base="$1"
-            # 分隔符用 #：正则里有 | （ERE 的「或」），用 | 会撞上分隔符。
-            local pattern='https?://(archive|security|azure\.archive|mirror\.gcr\.com|mirrors\.edge\.kernel\.org)[^ ]*/ubuntu/?'
-            sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list 2>/dev/null || true
-            sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          }
-
-          updated=0
-          # 顺序是探针实测出来的：runner 解析不了 Ubuntu 官方域名，
-          # 但 mirrors.edge.kernel.org 与 mirrors.aliyun.com 都能解析，
-          # 所以把能用的排在最前面，别在死域名上白等。
-          for base in \
-            "https://mirrors.edge.kernel.org/ubuntu/" \
-            "https://mirrors.aliyun.com/ubuntu/" \
-            "https://mirror.gcr.com/ubuntu/" \
-            "http://azure.archive.ubuntu.com/ubuntu/"
-          do
-            set_mirror "$base"
-            if timeout 150 sudo apt-get update -o Acquire::Retries=2; then
-              updated=1
-              break
-            fi
-            echo "镜像 ${base} 不通，换下一个"
-          done
-
-          # 装不上也不阻断：winit 与 glutin 在 Linux 上是运行时动态加载的，
-          # 未必需要这些开发包。装不上就直接试着编译，让编译器说话。
-          if [ "$updated" -eq 1 ]; then
-            timeout 300 sudo apt-get install -y --no-install-recommends \
-              -o Acquire::Retries=3 \
-              libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
-              libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-              libwayland-dev libssl-dev pkg-config \
-              || echo "依赖没装上，接着试着编译"
-          else
-            echo "镜像源都解析不了，直接试着编译"
-          fi
+          echo "=== 直接进入构建 ==="
 
       - name: 安装 musl 工具链
         if: matrix.target == 'x86_64-unknown-linux-musl'
