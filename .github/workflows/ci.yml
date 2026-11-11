@@ -44,22 +44,42 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          # The name servers of the runner sometimes fail to resolve the
-          # Ubuntu mirrors for a moment, and apt gives up right away. The
-          # mirror is tried again instead of failing the whole run.
+          set -euo pipefail
+
+          # GitHub 的 runner 偶尔解析不了 Ubuntu 官方域名（archive.ubuntu.com
+          # 等），而 GitHub 自己的域名却一切正常，于是 apt 装不上图形依赖，
+          # 整个构建就卡在这里。依次换几个镜像域名试试，总有一个能通。
+          set_mirror() {
+            local base="$1"
+            local pattern='https?://(archive|security|azure\.archive|mirror\.gcr\.com|mirrors\.edge\.kernel\.org)[^ ]*/ubuntu/?'
+            # 分隔符用 #：正则里有 | （ERE 的「或」），用 | 会撞上分隔符。
+            sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list 2>/dev/null || true
+            sudo sed -i -E "s#$pattern#${base}#g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          }
+
           updated=0
-          for attempt in 1 2 3 4 5; do
-            if sudo apt-get update -o Acquire::Retries=5; then
-              updated=1
-              break
-            fi
-            echo "apt-get update 失败（第 ${attempt} 次），等 15 秒后重试"
-            sleep 15
+          for base in \
+            "https://mirror.gcr.com/ubuntu/" \
+            "https://mirrors.edge.kernel.org/ubuntu/" \
+            "http://azure.archive.ubuntu.com/ubuntu/"
+          do
+            set_mirror "$base"
+            for attempt in 1 2 3; do
+              if sudo apt-get update -o Acquire::Retries=3; then
+                updated=1
+                break 2
+              fi
+              echo "apt-get update 失败（${base}，第 ${attempt} 次），等 10 秒后重试"
+              sleep 10
+            done
+            echo "镜像 ${base} 不通，换下一个"
           done
+
           if [ "$updated" -ne 1 ]; then
-            echo "镜像源一直解析不了，放弃安装" >&2
+            echo "所有镜像都解析不了，无法安装依赖" >&2
             exit 1
           fi
+
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::Retries=5 \
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
