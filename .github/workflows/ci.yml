@@ -44,8 +44,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          sudo apt-get update
+          # The name servers of the runner sometimes fail to resolve the
+          # Ubuntu mirrors for a moment, and apt gives up right away. The
+          # mirror is tried again instead of failing the whole run.
+          updated=0
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update -o Acquire::Retries=5; then
+              updated=1
+              break
+            fi
+            echo "apt-get update 失败（第 ${attempt} 次），等 15 秒后重试"
+            sleep 15
+          done
+          if [ "$updated" -ne 1 ]; then
+            echo "镜像源一直解析不了，放弃安装" >&2
+            exit 1
+          fi
           sudo apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=5 \
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libwayland-dev libssl-dev pkg-config
