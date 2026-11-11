@@ -44,23 +44,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          set -uo pipefail
-
-          # runner 解析不了 Ubuntu 官方域名（archive.ubuntu.com 等），
+          # 这里只做检查，不去装包：runner 解析不了 Ubuntu 官方域名，
           # 每次查询要等 20 秒才失败，apt 一轮下来能磨掉二十分钟。
-          # 但图形库其实不必装：winit 与 glutin 在 Linux 上是运行时动态加载
-          # 的，编译期不链接这些库，而 runner 镜像里运行时库本来就带着。
-          # 所以这里只做检查，不去装包 —— 真缺什么，编译器会明确报出来。
+          # 而图形库不必装 —— winit 与 glutin 在 Linux 上是运行时动态加载的，
+          # 编译期不链接这些库，runner 镜像里运行时库本来就带着。
+          #
+          # 每条命令都自己兜住错误：GitHub 的 bash 带着 -e，
+          # 任何一条返回非零都会把整个步骤判成失败。
           echo "=== 预装的图形库 ==="
           ls /usr/lib/x86_64-linux-gnu/ 2>/dev/null \
-            | grep -E "^lib(GL|EGL|GLX|X11|xcb|xkbcommon|wayland)\." | head -20
+            | grep -E "^lib(GL|EGL|GLX|X11|xcb|xkbcommon|wayland)\." | head -20 || true
           echo "=== 头文件 ==="
-          ls -d /usr/include/GL /usr/include/EGL /usr/include/X11 /usr/include/xkbcommon 2>&1 | head -6
+          ls -d /usr/include/GL /usr/include/EGL /usr/include/X11 /usr/include/xkbcommon 2>&1 | head -6 || true
           echo "=== 工具 ==="
           for t in pkg-config cc gcc; do
-            printf '  %-12s %s\n' "$t" "$(command -v $t || echo 缺)"
+            printf '  %-12s %s\n' "$t" "$(command -v $t || echo 缺)" || true
           done
           echo "=== 直接进入构建 ==="
+          true
 
       # The cargo invocations are written for bash on purpose: PowerShell 7.3
       # treats a bare `--` as the stop-parsing token and would swallow the
