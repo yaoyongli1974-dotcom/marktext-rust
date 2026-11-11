@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则用触发 push 的 ref）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux 的 GNU 版本跑在较老的 runner 上，glibc 依赖更广，发行面更宽。
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: marktext-x86_64-unknown-linux-gnu
+            crates: 'marktext-cli marktext-app'
+            binaries: 'marktext marktext-app'
+          # musl 静态版只带命令行工具 —— 它没有系统依赖，放在任何发行版上都能跑。
+          # GUI 依赖 OpenGL/Wayland，静态链接它们没有意义，因此不构建。
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            asset: marktext-x86_64-unknown-linux-musl
+            crates: 'marktext-cli'
+            binaries: 'marktext'
+          # Windows 用 MSVC 工具链：raw-dylib 导入库由 rustc 自带的
+          # llvm-dlltool 生成，不需要 GNU 汇编器，也就不需要 dlltool 代理。
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: marktext-x86_64-pc-windows-msvc
+            crates: 'marktext-cli marktext-app'
+            binaries: 'marktext marktext-app'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-${{ matrix.target }}-
+
+      - name: 安装 Linux 图形依赖
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libwayland-dev libssl-dev pkg-config
+
+      - name: 安装 musl 工具链
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y --no-install-recommends musl-tools musl-dev
+
+      - name: 构建 release
+        run: |
+          set -euo pipefail
+          crates=""
+          for crate in ${{ matrix.crates }}; do
+            crates="$crates -p $crate"
+          done
+          cargo build --release --target ${{ matrix.target }} $crates
+
+      - name: 打包（Linux）
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          cp README.md LICENSE NOTICE.md stage/
+          for name in ${{ matrix.binaries }}; do
+            cp "target/${{ matrix.target }}/release/$name" stage/
+          done
+          tar -C stage -czf "${{ matrix.asset }}.tar.gz" .
+          ls -la "${{ matrix.asset }}.tar.gz"
+
+      - name: 打包（Windows）
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item README.md, LICENSE, NOTICE.md stage/
+          foreach ($name in ('${{ matrix.binaries }}' -split ' ')) {
+            Copy-Item "target/${{ matrix.target }}/release/$name.exe" stage/
+          }
+          Compress-Archive -Path stage/* -DestinationPath "${{ matrix.asset }}.zip" -Force
+          Get-Item "${{ matrix.asset }}.zip" | Format-List Name, Length
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.zip
+          if-no-files-found: error
+
+  release:
+    name: 创建 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -la artifacts
+
+      - name: 生成校验和
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 生成发布说明
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## MarkText Rust 引擎
+
+          MarkText（`packages/muya`）核心编辑引擎的 Rust 移植，逐条复刻原版的解析与序列化契约。
+
+          ### 产物
+
+          | 平台 | 文件 | 说明 |
+          | :--- | :--- | :--- |
+          | Linux x86_64 (glibc) | `marktext-x86_64-unknown-linux-gnu.tar.gz` | `marktext`（命令行）+ `marktext-app`（桌面应用） |
+          | Linux x86_64 (静态) | `marktext-x86_64-unknown-linux-musl.tar.gz` | `marktext` 静态链接，无系统依赖 |
+          | Windows x86_64 | `marktext-x86_64-pc-windows-msvc.zip` | `marktext.exe`（命令行）+ `marktext-app.exe`（桌面应用） |
+
+          每个压缩包都带 `README.md`、`LICENSE`、`NOTICE.md`。
+
+          ### 合规状态
+
+          - CommonMark 0.31.2：**652/652（100%）**
+          - GFM 0.29：661/672；剩余 9 条为 GFM 0.29 旧强调算法与 CommonMark 0.31.2 rule-of-three 算法的版本冲突，不可同时满足。
+
+          对照：原版 `packages/muya` 跑同一套用例是 CommonMark 59 失败 / GFM 72 失败。
+
+          ### 使用
+
+          ```bash
+          # 命令行
+          ./marktext html README.md
+          ./marktext roundtrip README.md
+
+          # 桌面应用
+          ./marktext-app README.md
+          ```
+
+          ### 校验
+
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+          EOF
+          cat release-notes.md
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md --title "MarkText Rust 引擎 $TAG"
+          else
+            gh release create "$TAG" artifacts/* \
+              --notes-file release-notes.md \
+              --title "MarkText Rust 引擎 $TAG" \
+              --target "${GITHUB_SHA}"
+          fi
+          gh release view "$TAG"

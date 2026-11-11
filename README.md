@@ -7,6 +7,44 @@ MarkText（`packages/muya`）核心编辑引擎的 Rust 移植。目标不是「
 
 ---
 
+## 零、下载与安装
+
+预编译的 release 产物发布在 GitHub Releases：
+<https://github.com/yaoyongli1974-dotcom/marktext-rust/releases>
+
+| 平台 | 文件 | 内容 |
+| :--- | :--- | :--- |
+| Linux x86_64（glibc） | `marktext-x86_64-unknown-linux-gnu.tar.gz` | `marktext`（命令行）+ `marktext-app`（桌面应用） |
+| Linux x86_64（静态） | `marktext-x86_64-unknown-linux-musl.tar.gz` | `marktext` 静态链接，无系统依赖 |
+| Windows x86_64 | `marktext-x86_64-pc-windows-msvc.zip` | `marktext.exe`（命令行）+ `marktext-app.exe`（桌面应用） |
+
+```bash
+# 校验
+sha256sum -c SHA256SUMS.txt
+
+# 命令行
+./marktext html README.md
+./marktext roundtrip README.md
+./marktext toc README.md --text
+./marktext search README.md --query 强调
+
+# 桌面应用（带参数即打开该文件）
+./marktext-app README.md
+```
+
+Windows 上 `marktext-app.exe` 是 GUI 程序，**不带控制台窗口**；启动失败时会弹对话框提示原因。
+
+自己构建：
+
+```bash
+cargo build --release -p marktext-cli -p marktext-app
+```
+
+> Windows 上用 `x86_64-pc-windows-gnu` 工具链时需要 `dlltool-proxy`（仓库自带，见
+> `scripts/build.ps1`）；用 MSVC 工具链则不需要。
+
+---
+
 ## 一、合规状态
 
 | 规范套件 | 用例数 | 通过 | 失败 | 说明 |
