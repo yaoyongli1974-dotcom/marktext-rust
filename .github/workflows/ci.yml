@@ -49,9 +49,9 @@ jobs:
           # 先看看哪些域名能解析：runner 偶尔解析不了 Ubuntu 官方域名，
           # 而 GitHub 自己的域名却一切正常。
           echo "=== DNS 诊断 ==="
-          for host in archive.ubuntu.com mirror.gcr.com mirrors.edge.kernel.org \
-                      security.ubuntu.com crates.io github.com; do
-            if getent hosts "$host" >/dev/null 2>&1; then
+          for host in archive.ubuntu.com mirrors.edge.kernel.org mirrors.aliyun.com \
+                      crates.io github.com; do
+            if timeout 10 getent hosts "$host" >/dev/null 2>&1; then
               echo "  $host  能解析"
             else
               echo "  $host  解析不了"
@@ -68,9 +68,13 @@ jobs:
           }
 
           updated=0
+          # 顺序是探针实测出来的：runner 解析不了 Ubuntu 官方域名，
+          # 但 mirrors.edge.kernel.org 与 mirrors.aliyun.com 都能解析，
+          # 所以把能用的排在最前面，别在死域名上白等。
           for base in \
-            "https://mirror.gcr.com/ubuntu/" \
             "https://mirrors.edge.kernel.org/ubuntu/" \
+            "https://mirrors.aliyun.com/ubuntu/" \
+            "https://mirror.gcr.com/ubuntu/" \
             "http://azure.archive.ubuntu.com/ubuntu/"
           do
             set_mirror "$base"
@@ -84,7 +88,7 @@ jobs:
           # 装不上也不阻断：winit 与 glutin 在 Linux 上是运行时动态加载的，
           # 未必需要这些开发包。装不上就直接试着编译，让编译器说话。
           if [ "$updated" -eq 1 ]; then
-            sudo apt-get install -y --no-install-recommends \
+            timeout 300 sudo apt-get install -y --no-install-recommends \
               -o Acquire::Retries=3 \
               libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev \
               libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
