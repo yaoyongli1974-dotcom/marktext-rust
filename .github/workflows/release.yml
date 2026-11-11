@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p stage
-          cp README.md LICENSE NOTICE.md stage/
+          cp README.md CHANGELOG.md LICENSE NOTICE.md stage/
           for name in ${{ matrix.binaries }}; do
             cp "target/${{ matrix.target }}/release/$name" stage/
           done
@@ -103,7 +103,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path stage | Out-Null
-          Copy-Item README.md, LICENSE, NOTICE.md stage/
+          Copy-Item README.md, CHANGELOG.md, LICENSE, NOTICE.md stage/
           foreach ($name in ('${{ matrix.binaries }}' -split ' ')) {
             Copy-Item "target/${{ matrix.target }}/release/$name.exe" stage/
           }
@@ -184,6 +184,25 @@ jobs:
           sha256sum -c SHA256SUMS.txt
           ```
           EOF
+
+          # The notes of the released version are taken from the changelog,
+          # so that they do not have to be written twice.
+          TAG="${TAG:-${GITHUB_REF_NAME}}"
+          if [ -f CHANGELOG.md ]; then
+            CHANGES=$(awk -v tag="$TAG" '
+              $0 ~ "^## " tag "$" { grab = 1; next }
+              /^## / { grab = 0 }
+              grab { print }
+            ' CHANGELOG.md)
+            if [ -n "$CHANGES" ]; then
+              {
+                echo
+                echo "### 本次改动"
+                echo
+                echo "$CHANGES"
+              } >> release-notes.md
+            fi
+          fi
           cat release-notes.md
 
       - name: 创建 Release
