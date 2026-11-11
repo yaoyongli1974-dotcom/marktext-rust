@@ -46,6 +46,10 @@ jobs:
             binaries: 'marktext marktext-app'
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 手动触发时按输入的 tag 取源码，否则会构建触发分支的代码，
+          # 却把产物挂到那个 tag 上。
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
