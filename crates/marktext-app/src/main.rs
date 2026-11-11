@@ -4,10 +4,7 @@
 //! the rendered preview on the right. Both come out of the same engine, the
 //! `marktext-core` crate, which is a port of MarkText's `packages/muya`.
 
-#![cfg_attr(
-    all(windows, not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod preview;
@@ -73,4 +70,3 @@ fn report_failure(message: &str) {
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
 }
-
