@@ -7,6 +7,7 @@
 //! MarkText offers as its "source code" mode.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use egui::{
     Align, Color32, Context, Key, Layout, Modifiers, RichText, ScrollArea, Sense, Stroke, TextEdit,
@@ -17,11 +18,22 @@ use marktext_core::{
     SearchOptions, TocItem,
 };
 
+use crate::large::{self, DocumentScale, SourceChunks};
 use crate::preview;
 use crate::theme::{self, Palette, Theme};
 
 /// The name the window carries.
 pub const APP_NAME: &str = "MarkText";
+
+/// How long the editor waits before it parses a large document again.
+///
+/// Parsing a document of a few megabytes takes a moment, and doing that on
+/// every keystroke would make the editor stutter. A small document is parsed
+/// right away, because there the parse is cheaper than the delay.
+const REPARSE_DELAY: Duration = Duration::from_millis(400);
+
+/// The height of one row of the outline.
+const TOC_ROW_HEIGHT: f32 = 22.0;
 
 /// How the document area is laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +102,41 @@ pub struct MarkTextApp {
     parse_options: ParseOptions,
     /// The inline options.
     inline_options: InlineOptions,
+    /// How the document is rendered.
+    scale: DocumentScale,
+    /// The source cut into chunks, for a document that is too large to be laid
+    /// out in one piece.
+    chunks: SourceChunks,
+    /// The estimated height of every block of the preview.
+    preview_heights: Vec<f32>,
+    /// The width the heights were estimated for.
+    preview_width: f32,
+    /// Whether a large document waits for its reparse.
+    pending_reparse: bool,
+    /// When the waiting document is parsed again.
+    reparse_deadline: Option<Instant>,
+    /// The word and character count of the document.
+    stats: DocumentStats,
+}
+
+/// The word and character count of a document.
+///
+/// Both numbers are expensive to compute for a large document, so they are
+/// kept and only refreshed when the source changes.
+#[derive(Debug, Clone, Copy, Default)]
+struct DocumentStats {
+    words: usize,
+    chars: usize,
+}
+
+impl DocumentStats {
+    /// Count the words and characters of a source.
+    fn of(source: &str) -> DocumentStats {
+        DocumentStats {
+            words: source.split_whitespace().count(),
+            chars: source.chars().count(),
+        }
+    }
 }
 
 impl MarkTextApp {
@@ -120,6 +167,13 @@ impl MarkTextApp {
             pending_scroll: None,
             parse_options: ParseOptions::default(),
             inline_options: InlineOptions::default(),
+            scale: DocumentScale::Small,
+            chunks: SourceChunks::default(),
+            preview_heights: Vec::new(),
+            preview_width: 0.0,
+            pending_reparse: false,
+            reparse_deadline: None,
+            stats: DocumentStats::of(WELCOME),
         }
     }
 
@@ -135,6 +189,8 @@ impl MarkTextApp {
                 self.source = source;
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
+                self.scale = DocumentScale::of(&self.source);
+                self.chunks = SourceChunks::new(&self.source);
                 self.reparse();
                 self.status = format!("已打开 {}", path.display());
             }
@@ -150,6 +206,7 @@ impl MarkTextApp {
             self.save_as();
             return;
         };
+        self.flush_source();
         match std::fs::write(&path, &self.source) {
             Ok(()) => {
                 self.dirty = false;
@@ -158,6 +215,16 @@ impl MarkTextApp {
             Err(err) => {
                 self.status = format!("无法保存 {}：{err}", path.display());
             }
+        }
+    }
+
+    /// Write the chunks of a large document back into the source.
+    ///
+    /// A large document is parsed with a delay, so the source can still be
+    /// behind the chunks. Saving has to use the text that is on the screen.
+    fn flush_source(&mut self) {
+        if self.scale.is_large() {
+            self.source = self.chunks.source();
         }
     }
 
@@ -171,6 +238,7 @@ impl MarkTextApp {
         else {
             return;
         };
+        self.flush_source();
         match std::fs::write(&path, &self.source) {
             Ok(()) => {
                 self.path = Some(path.clone());
@@ -197,7 +265,27 @@ impl MarkTextApp {
     }
 
     /// Re-parse the source and rebuild the outline.
+    ///
+    /// A large document waits until the typing stops, because parsing a few
+    /// megabytes on every keystroke would cost more than the delay.
     fn reparse(&mut self) {
+        if self.scale.is_large() {
+            self.pending_reparse = true;
+            self.reparse_deadline = Some(Instant::now() + REPARSE_DELAY);
+            return;
+        }
+        self.reparse_now();
+    }
+
+    /// Parse the source right away.
+    fn reparse_now(&mut self) {
+        self.pending_reparse = false;
+        self.reparse_deadline = None;
+        if self.scale.is_large() {
+            // The chunks hold the edited source of a large document.
+            self.source = self.chunks.source();
+        }
+        self.stats = DocumentStats::of(&self.source);
         match parse_with(&self.source, &self.parse_options) {
             Ok(document) => {
                 self.document = document;
@@ -208,6 +296,19 @@ impl MarkTextApp {
                 self.parse_failed = true;
                 self.status = format!("解析失败：{err}");
             }
+        }
+    }
+
+    /// Parse a large document once the typing has stopped.
+    fn run_pending_reparse(&mut self, ctx: &Context) {
+        let Some(deadline) = self.reparse_deadline else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= deadline {
+            self.reparse_now();
+        } else {
+            ctx.request_repaint_after(deadline - now);
         }
     }
 
@@ -227,6 +328,7 @@ impl eframe::App for MarkTextApp {
         apply_theme(ctx, self.theme);
 
         self.handle_shortcuts(ctx);
+        self.run_pending_reparse(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| self.menu_bar(ui));
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| self.status_bar(ui));
@@ -304,6 +406,8 @@ impl MarkTextApp {
                     self.source.clear();
                     self.path = None;
                     self.dirty = false;
+                    self.scale = DocumentScale::Small;
+                    self.chunks = SourceChunks::default();
                     self.reparse();
                     self.status = "新建文档".to_string();
                     ui.close();
@@ -409,33 +513,11 @@ impl MarkTextApp {
 
         ui.separator();
 
-        ScrollArea::vertical().show(ui, |ui| {
-            if self.toc.is_empty() {
-                ui.label(
-                    RichText::new("文档没有标题")
-                        .weak()
-                        .color(palette.weak_text),
-                );
-                return;
-            }
-            let mut pending = None;
-            for item in &self.toc {
-                let indent = (item.level.saturating_sub(1)) as f32 * 12.0;
-                ui.horizontal(|ui| {
-                    ui.add_space(indent);
-                    let response = ui.add(
-                        egui::Label::new(RichText::new(&item.content).color(palette.text))
-                            .sense(Sense::click()),
-                    );
-                    if response.clicked() {
-                        pending = Some(item.content.clone());
-                    }
-                });
-            }
-            if let Some(text) = pending {
-                self.pending_scroll = Some(text);
-            }
-        });
+        // The outline of a large document holds thousands of headings, so
+        // only the ones on screen are drawn.
+        if let Some(text) = draw_toc(ui, &self.toc, &palette) {
+            self.pending_scroll = Some(text);
+        }
     }
 
     /// Draw the search results.
@@ -501,6 +583,19 @@ impl MarkTextApp {
 
     /// Draw the Markdown source editor.
     fn source_editor(&mut self, ui: &mut Ui, palette: Palette) {
+        if self.scale.is_large() {
+            self.source_editor_windowed(ui);
+        } else {
+            self.source_editor_whole(ui);
+        }
+        let _ = palette;
+    }
+
+    /// Draw the whole source in one text edit.
+    ///
+    /// A text edit widget lays out the whole text it holds, so this is only
+    /// used for a document that is small enough for that.
+    fn source_editor_whole(&mut self, ui: &mut Ui) {
         let editor = TextEdit::multiline(&mut self.source)
             .code_editor()
             .font(theme::body_font(14.0))
@@ -515,7 +610,28 @@ impl MarkTextApp {
         if let Some(range) = output.cursor_range {
             self.cursor_line = crate::line_of_cursor(&self.source, range.primary.index);
         }
-        let _ = palette;
+    }
+
+    /// Draw the source of a large document in chunks.
+    ///
+    /// The source is cut into chunks and only the chunks that are on screen
+    /// are laid out, so the memory the editor needs stays the same no matter
+    /// how long the document is.
+    fn source_editor_windowed(&mut self, ui: &mut Ui) {
+        // The chunks are taken out of the editor for the time of the layout,
+        // because the layout borrows them while the editor is borrowed too.
+        let mut chunks = std::mem::take(&mut self.chunks);
+        let edit = large::draw_chunks(ui, &mut chunks);
+        self.chunks = chunks;
+
+        if edit.changed {
+            self.dirty = true;
+            self.reparse();
+        }
+        if let Some((index, start_line, cursor_index)) = edit.cursor {
+            let text = &self.chunks.pieces()[index];
+            self.cursor_line = start_line + crate::line_of_cursor(text, cursor_index);
+        }
     }
 
     /// Draw the rendered preview.
@@ -534,18 +650,36 @@ impl MarkTextApp {
             }
         }
 
+        let scale = self.scale;
+        // The heights are only needed when the preview is drawn in windows.
+        // They have to be worked out before the blocks are borrowed, because
+        // working them out needs the editor for itself.
+        if scale.is_large() {
+            self.update_preview_heights(ui.available_width());
+        }
+        let heights = if scale.is_large() {
+            Some(&self.preview_heights[..])
+        } else {
+            None
+        };
+        let blocks = &self.document.blocks;
+        let inline_options = &self.inline_options;
+
         scroll_area.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            if self.document.blocks.is_empty() {
+            if blocks.is_empty() {
                 ui.label(RichText::new("空文档").weak().color(palette.weak_text));
-            } else {
-                preview::draw_blocks(
+            } else if let Some(heights) = heights {
+                preview::draw_blocks_windowed(
                     ui,
-                    &self.document.blocks,
+                    blocks,
+                    heights,
                     &palette,
-                    &self.inline_options,
+                    inline_options,
                     &mut headings,
                 );
+            } else {
+                preview::draw_blocks(ui, blocks, &palette, inline_options, &mut headings);
             }
         });
 
@@ -553,11 +687,26 @@ impl MarkTextApp {
         self.pending_scroll = None;
     }
 
+    /// The estimated height of every block of the preview.
+    ///
+    /// The heights only change when the width of the pane changes, so they
+    /// are kept instead of being worked out on every frame — counting the
+    /// characters of a large document costs as much as parsing it.
+    fn update_preview_heights(&mut self, width: f32) {
+        let blocks = self.document.blocks.len();
+        if (self.preview_width - width).abs() > 1.0 || self.preview_heights.len() != blocks {
+            self.preview_heights = preview::estimate_block_heights(&self.document.blocks, width);
+            self.preview_width = width;
+        }
+    }
+
     /// Draw the status bar.
     fn status_bar(&mut self, ui: &mut Ui) {
         let palette = self.palette();
-        let words = self.source.split_whitespace().count();
-        let chars = self.source.chars().count();
+        // The counts are taken from the cache: counting the words of a large
+        // document on every frame would keep the processor busy for good.
+        let words = self.stats.words;
+        let chars = self.stats.chars;
         let title = self
             .path
             .as_ref()
@@ -595,6 +744,9 @@ impl MarkTextApp {
         else {
             return;
         };
+        // The preview of a large document can be a moment behind the text.
+        self.flush_source();
+        self.reparse_now();
         let options = RenderOptions {
             references: self.document.references.clone(),
             ..RenderOptions::default()
@@ -646,3 +798,56 @@ let markdown = marktext_core::serialize(&blocks, Default::default());
 - [x] 无损序列化
 - [ ] 实时协同编辑
 ";
+
+/// Draw the outline of the document.
+///
+/// The outline of a large document holds thousands of headings, so only the
+/// ones that are on screen are drawn. The heading that was clicked on is
+/// returned, so that the preview can jump to it.
+pub fn draw_toc(ui: &mut Ui, toc: &[TocItem], palette: &Palette) -> Option<String> {
+    let mut clicked = None;
+
+    ScrollArea::vertical().id_salt("toc_scroll").show(ui, |ui| {
+        if toc.is_empty() {
+            ui.label(
+                RichText::new("文档没有标题")
+                    .weak()
+                    .color(palette.weak_text),
+            );
+            return;
+        }
+        let width = ui.available_width();
+        let total = toc.len() as f32 * TOC_ROW_HEIGHT;
+        ui.allocate_space(egui::vec2(width, total));
+
+        let origin = ui.min_rect().min;
+        let clip = ui.clip_rect();
+        let visible_top = clip.min.y - origin.y - TOC_ROW_HEIGHT;
+        let visible_bottom = clip.max.y - origin.y + TOC_ROW_HEIGHT;
+        let first = ((visible_top / TOC_ROW_HEIGHT).floor().max(0.0) as usize).min(toc.len());
+        let last = ((visible_bottom / TOC_ROW_HEIGHT).ceil().max(0.0) as usize).min(toc.len());
+
+        for (index, item) in toc.iter().enumerate().skip(first).take(last - first) {
+            let indent = (item.level.saturating_sub(1)) as f32 * 12.0;
+            let y = index as f32 * TOC_ROW_HEIGHT;
+            let rect = egui::Rect::from_min_size(
+                origin + egui::vec2(0.0, y),
+                egui::vec2(width, TOC_ROW_HEIGHT),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    let response = ui.add(
+                        egui::Label::new(RichText::new(&item.content).color(palette.text))
+                            .sense(Sense::click()),
+                    );
+                    if response.clicked() {
+                        clicked = Some(item.content.clone());
+                    }
+                });
+            });
+        }
+    });
+
+    clicked
+}

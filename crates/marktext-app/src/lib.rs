@@ -5,6 +5,7 @@
 //! position into a line number. The binary only starts the window.
 
 pub mod app;
+pub mod large;
 pub mod preview;
 pub mod theme;
 

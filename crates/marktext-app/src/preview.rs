@@ -15,6 +15,16 @@ use crate::theme::Palette;
 /// The size of the body text in the preview.
 pub const BODY_SIZE: f32 = 15.0;
 
+/// The height of one line of body text.
+///
+/// The estimate of a block height is built from this number, so it has to be
+/// a little larger than the real line height to keep the blocks from
+/// overlapping.
+pub const ROW_HEIGHT: f32 = 20.0;
+
+/// The vertical room a block leaves around its text.
+const BLOCK_SPACING: f32 = 8.0;
+
 /// Draw the block tree into `ui`.
 ///
 /// `scroll_to` names a heading whose text should be scrolled into view; the
@@ -27,9 +37,197 @@ pub fn draw_blocks(
     inline_options: &InlineOptions,
     headings: &mut Vec<(String, Vec2)>,
 ) {
+    // The origin of the pane. The position of a heading is kept relative to
+    // it, because that is the number the scroll bar wants.
+    let origin = ui.min_rect().min;
     for block in blocks {
         draw_block(ui, block, palette, inline_options, headings, 0);
     }
+    for entry in headings.iter_mut() {
+        entry.1 -= origin.to_vec2();
+    }
+}
+
+/// Estimate how tall every block is when it is drawn at `width`.
+///
+/// The numbers only have to be good enough to place the scroll bar and to
+/// find the blocks that are on screen; the blocks that are really visible are
+/// laid out for real. The result is meant to be cached, because counting the
+/// characters of the whole document is as expensive as parsing it.
+pub fn estimate_block_heights(blocks: &[Block], width: f32) -> Vec<f32> {
+    blocks
+        .iter()
+        .map(|block| estimate_block_height(block, width))
+        .collect()
+}
+
+/// The estimated height of one block.
+fn estimate_block_height(block: &Block, width: f32) -> f32 {
+    estimate_block_lines(block, width) * ROW_HEIGHT + BLOCK_SPACING
+}
+
+/// The estimated number of lines a block takes up.
+fn estimate_block_lines(block: &Block, width: f32) -> f32 {
+    match block.kind {
+        BlockKind::Paragraph => estimate_text_lines(block.text(), width),
+        BlockKind::AtxHeading | BlockKind::SetextHeading => {
+            estimate_text_lines(block.text(), width) + 1.0
+        }
+        BlockKind::CodeBlock => count_lines(block.text()) as f32,
+        BlockKind::HtmlBlock
+        | BlockKind::MathBlock
+        | BlockKind::Frontmatter
+        | BlockKind::Diagram => count_lines(block.text()) as f32 + 2.0,
+        BlockKind::ThematicBreak => 1.0,
+        BlockKind::Table => {
+            // Every row of the table is one line, plus the frame around it.
+            block.children().len() as f32 + 2.0
+        }
+        BlockKind::TableRow => block.children().len() as f32,
+        BlockKind::TableCell => 1.0,
+        BlockKind::BlockQuote | BlockKind::GithubAlert | BlockKind::Footnote => {
+            let inner: f32 = block
+                .children()
+                .iter()
+                .map(|child| estimate_block_lines(child, width))
+                .sum();
+            inner + 2.0
+        }
+        BlockKind::BulletList | BlockKind::OrderList | BlockKind::TaskList => {
+            let inner: f32 = block
+                .children()
+                .iter()
+                .map(|child| estimate_block_lines(child, width))
+                .sum();
+            inner + 1.0
+        }
+        BlockKind::ListItem | BlockKind::TaskListItem => {
+            let inner: f32 = block
+                .children()
+                .iter()
+                .map(|child| estimate_block_lines(child, width))
+                .sum();
+            inner.max(1.0)
+        }
+    }
+}
+
+/// The number of lines a piece of text takes up when it is wrapped.
+///
+/// The hard line breaks of the text are counted exactly; the soft ones are
+/// estimated from the number of characters, because laying the text out to
+/// find out would cost as much as drawing the whole document.
+fn estimate_text_lines(text: &str, width: f32) -> f32 {
+    if text.is_empty() {
+        return 1.0;
+    }
+    let hard = text.split('\n').count() as f32;
+    // A line holds roughly this many characters. Chinese characters are as
+    // wide as the font size, latin ones about half of that, so the average
+    // sits in between.
+    let per_line = (width / (BODY_SIZE * 0.75)).max(1.0);
+    let soft = (text.chars().count() as f32 / per_line).ceil();
+    hard.max(soft)
+}
+
+/// The number of lines a piece of text holds.
+fn count_lines(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.split('\n').count()
+    }
+}
+
+/// The blocks that lie inside the visible window.
+///
+/// `heights` holds the estimated height of every block, and the window
+/// starts at `top` and ends at `bottom`, both in the coordinates of the
+/// content of the pane.
+///
+/// The function is pure on purpose: it decides what has to be drawn, and
+/// that decision can be checked without a window.
+pub fn visible_block_range(heights: &[f32], top: f32, bottom: f32) -> std::ops::Range<usize> {
+    if heights.is_empty() {
+        return 0..0;
+    }
+
+    let mut offset = 0.0f32;
+    let mut first = None;
+    let mut last = 0usize;
+    for (index, height) in heights.iter().enumerate() {
+        if first.is_none() && offset + height >= top {
+            first = Some(index);
+        }
+        if offset <= bottom {
+            last = index;
+        }
+        offset += height;
+    }
+
+    let first = first.unwrap_or(0);
+    let last = last.min(heights.len() - 1);
+    first..(last + 1)
+}
+
+/// Draw the blocks that lie inside the visible window only.
+///
+/// `heights` holds the estimated height of every block. It is used to place
+/// the scroll bar and to find the blocks that are on screen, so that a
+/// document of hundreds of thousands of lines does not have to be laid out
+/// as a whole.
+///
+/// The number of blocks that were drawn is returned, so that a caller can
+/// tell how much of the document is on screen.
+pub fn draw_blocks_windowed(
+    ui: &mut Ui,
+    blocks: &[Block],
+    heights: &[f32],
+    palette: &Palette,
+    inline_options: &InlineOptions,
+    headings: &mut Vec<(String, Vec2)>,
+) -> usize {
+    let width = ui.available_width();
+    let total: f32 = heights.iter().sum();
+
+    // The room the whole document takes up, so that the scroll bar knows how
+    // far the document reaches.
+    ui.allocate_space(Vec2::new(width, total));
+
+    // The origin of the content and the window that is on screen. Both are
+    // in the same coordinates, so their difference gives the position inside
+    // the document.
+    let origin = ui.min_rect().min;
+    let clip = ui.clip_rect();
+    // A row of slack on both sides keeps a block from being skipped when the
+    // estimate is a little off.
+    let visible_top = clip.min.y - origin.y - ROW_HEIGHT;
+    let visible_bottom = clip.max.y - origin.y + ROW_HEIGHT;
+
+    let range = visible_block_range(heights, visible_top, visible_bottom);
+    let first = range.start;
+    let last = range.end.min(blocks.len());
+
+    let mut y: f32 = heights[..first].iter().sum();
+    let mut drawn = 0usize;
+    for (index, block) in blocks.iter().enumerate().skip(first).take(last - first) {
+        let height = heights[index];
+        let rect =
+            egui::Rect::from_min_size(origin + egui::vec2(0.0, y), egui::vec2(width, height));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            draw_block(ui, block, palette, inline_options, headings, 0);
+        });
+        drawn += 1;
+        y += height;
+    }
+
+    // The position of a heading is kept relative to the top of the document,
+    // because that is the number the scroll bar wants.
+    for entry in headings.iter_mut() {
+        entry.1 -= origin.to_vec2();
+    }
+
+    drawn
 }
 
 /// Draw one block and its children.
