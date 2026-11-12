@@ -15,7 +15,7 @@ use egui::{
 };
 use marktext_core::{
     build_toc, parse, search_document, Document, InlineOptions, ParseOptions, RenderOptions,
-    SearchOptions, TocItem,
+    SearchMatch, SearchOptions, TocItem,
 };
 
 use crate::large::{self, DocumentScale, SourceChunks};
@@ -66,6 +66,17 @@ impl LayoutMode {
     }
 }
 
+/// How the "unsaved changes" dialog was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDecision {
+    /// Save the document, then close.
+    Save,
+    /// Close and throw the changes away.
+    Discard,
+    /// Keep editing.
+    Cancel,
+}
+
 /// The state of the application.
 pub struct MarkTextApp {
     /// The Markdown source of the open document.
@@ -109,6 +120,8 @@ pub struct MarkTextApp {
     chunks: SourceChunks,
     /// The estimated height of every block of the preview.
     preview_heights: Vec<f32>,
+    /// The source revision the cached heights belong to.
+    preview_heights_revision: u64,
     /// The width the heights were estimated for.
     preview_width: f32,
     /// Whether a large document waits for its reparse.
@@ -117,6 +130,40 @@ pub struct MarkTextApp {
     reparse_deadline: Option<Instant>,
     /// The word and character count of the document.
     stats: DocumentStats,
+    /// A counter that changes whenever the source is parsed again.
+    ///
+    /// The search results are kept until this changes, so that a large
+    /// document is not searched again on every frame the panel is open.
+    source_revision: u64,
+    /// The cached result of the sidebar search.
+    search_cache: SearchCache,
+    /// The action waiting for the "unsaved changes" dialog to be answered.
+    pending_action: Option<PendingAction>,
+}
+
+/// An action that has to wait while the user decides what to do with unsaved
+/// edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingAction {
+    /// Start an empty document.
+    New,
+    /// Ask for a file to open.
+    Open,
+    /// Open a file that is already known, such as a dropped one.
+    OpenPath(PathBuf),
+    /// Close the window.
+    Close,
+}
+
+/// The last search that was run for the sidebar.
+#[derive(Debug, Clone, Default)]
+struct SearchCache {
+    /// The query the matches belong to.
+    query: String,
+    /// The source revision the matches belong to.
+    revision: u64,
+    /// The matches of that query.
+    matches: Vec<SearchMatch>,
 }
 
 /// The word and character count of a document.
@@ -171,9 +218,13 @@ impl MarkTextApp {
             chunks: SourceChunks::default(),
             preview_heights: Vec::new(),
             preview_width: 0.0,
+            preview_heights_revision: 0,
             pending_reparse: false,
             reparse_deadline: None,
             stats: DocumentStats::of(WELCOME),
+            source_revision: 0,
+            search_cache: SearchCache::default(),
+            pending_action: None,
         }
     }
 
@@ -285,6 +336,8 @@ impl MarkTextApp {
             // The chunks hold the edited source of a large document.
             self.source = self.chunks.source();
         }
+        self.source_revision = self.source_revision.wrapping_add(1);
+        self.update_scale();
         self.stats = DocumentStats::of(&self.source);
         match parse_with(&self.source, &self.parse_options) {
             Ok(document) => {
@@ -296,6 +349,30 @@ impl MarkTextApp {
                 self.parse_failed = true;
                 self.status = format!("解析失败：{err}");
             }
+        }
+    }
+
+    /// Keep the layout mode in step with the size of the document.
+    ///
+    /// A document can cross the threshold while it is being edited — a long
+    /// log pasted into an empty buffer, or the tail of a large file deleted.
+    /// Without this check the mode would stay whatever it was when the file
+    /// was opened.
+    fn update_scale(&mut self) {
+        let scale = DocumentScale::of(&self.source);
+        if scale == self.scale {
+            if scale.is_large() && self.chunks.pieces().is_empty() {
+                self.chunks = SourceChunks::new(&self.source);
+            }
+            return;
+        }
+
+        self.scale = scale;
+        if scale.is_large() {
+            self.chunks = SourceChunks::new(&self.source);
+            self.status = "文档较大，已切换到窗口模式".to_string();
+        } else {
+            self.chunks = SourceChunks::default();
         }
     }
 
@@ -327,6 +404,8 @@ impl eframe::App for MarkTextApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         apply_theme(ctx, self.theme);
 
+        self.handle_confirmation(ctx);
+        self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.run_pending_reparse(ctx);
 
@@ -374,6 +453,127 @@ impl Default for MarkTextApp {
 }
 
 impl MarkTextApp {
+    /// Ask before an action throws away unsaved edits.
+    fn request_action(&mut self, ctx: &Context, action: PendingAction) {
+        if self.dirty {
+            self.pending_action = Some(action);
+        } else {
+            self.perform(ctx, action);
+        }
+    }
+
+    /// Carry out an action that may have waited for the dialog.
+    fn perform(&mut self, ctx: &Context, action: PendingAction) {
+        match action {
+            PendingAction::New => self.new_document(),
+            PendingAction::Open => self.open_dialog(),
+            PendingAction::OpenPath(path) => self.open_path(&path),
+            PendingAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    /// Start an empty document.
+    fn new_document(&mut self) {
+        self.source.clear();
+        self.path = None;
+        self.dirty = false;
+        self.scale = DocumentScale::Small;
+        self.chunks = SourceChunks::default();
+        self.reparse();
+        self.status = "新建文档".to_string();
+    }
+
+    /// Show the "unsaved changes" dialog and run the waiting action.
+    ///
+    /// The window close button, the New and Open menu items and a dropped file
+    /// all go through here; without it each of them replaced the document in
+    /// place and every edit since the last save was lost.
+    fn handle_confirmation(&mut self, ctx: &Context) {
+        if ctx.input(|input| input.viewport().close_requested()) && self.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_action.get_or_insert(PendingAction::Close);
+        }
+
+        let Some(action) = self.pending_action.clone() else {
+            return;
+        };
+
+        // The edits may have been undone or saved while the dialog was open.
+        if !self.dirty {
+            self.pending_action = None;
+            self.perform(ctx, action);
+            return;
+        }
+
+        let mut decision = None;
+        egui::Window::new("未保存的更改")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("当前文档有未保存的更改。");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("保存并继续").clicked() {
+                        decision = Some(CloseDecision::Save);
+                    }
+                    if ui.button("不保存").clicked() {
+                        decision = Some(CloseDecision::Discard);
+                    }
+                    if ui.button("取消").clicked() {
+                        decision = Some(CloseDecision::Cancel);
+                    }
+                });
+            });
+
+        match decision {
+            Some(CloseDecision::Save) => {
+                self.save();
+                // `save` falls back to "save as"; if that dialog is cancelled
+                // the document is still dirty and nothing may be discarded.
+                if !self.dirty {
+                    self.pending_action = None;
+                    self.perform(ctx, action);
+                }
+            }
+            Some(CloseDecision::Discard) => {
+                // New and Open reset `dirty` themselves, and only once the
+                // document was actually replaced. Clearing it here would
+                // throw the edits away even when the file dialog is
+                // cancelled. A close, on the other hand, must not re-enter
+                // this dialog.
+                if matches!(action, PendingAction::Close) {
+                    self.dirty = false;
+                }
+                self.pending_action = None;
+                self.perform(ctx, action);
+            }
+            Some(CloseDecision::Cancel) => {
+                self.pending_action = None;
+            }
+            // The request has been cancelled, so the dialog keeps the window
+            // alive until it is answered.
+            None => ctx.request_repaint(),
+        }
+    }
+
+    /// Open a file that was dropped on the window.
+    fn handle_dropped_files(&mut self, ctx: &Context) {
+        if self.pending_action.is_some() {
+            return;
+        }
+        let path = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .find_map(|file| file.path.clone())
+        });
+        if let Some(path) = path {
+            self.request_action(ctx, PendingAction::OpenPath(path));
+        }
+    }
+
     /// Handle the keyboard shortcuts.
     fn handle_shortcuts(&mut self, ctx: &Context) {
         let save = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S));
@@ -383,7 +583,7 @@ impl MarkTextApp {
 
         let open = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O));
         if open {
-            self.open_dialog();
+            self.request_action(ctx, PendingAction::Open);
         }
 
         let toggle_layout = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::L));
@@ -403,17 +603,11 @@ impl MarkTextApp {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("文件", |ui| {
                 if ui.button("新建").clicked() {
-                    self.source.clear();
-                    self.path = None;
-                    self.dirty = false;
-                    self.scale = DocumentScale::Small;
-                    self.chunks = SourceChunks::default();
-                    self.reparse();
-                    self.status = "新建文档".to_string();
+                    self.request_action(ui.ctx(), PendingAction::New);
                     ui.close();
                 }
                 if ui.button("打开…").clicked() {
-                    self.open_dialog();
+                    self.request_action(ui.ctx(), PendingAction::Open);
                     ui.close();
                 }
                 if ui.button("保存").clicked() {
@@ -524,36 +718,81 @@ impl MarkTextApp {
     fn draw_search_results(&mut self, ui: &mut Ui) {
         let palette = self.palette();
         if self.search_query.is_empty() {
+            self.search_cache = SearchCache::default();
             return;
         }
-        let matches = search_document(
-            &self.source,
-            &self.search_query,
-            SearchOptions {
-                case_insensitive: true,
-                regex: false,
-                context: 24,
-            },
-        );
-        if matches.is_empty() {
+
+        // Searching lowercases (and for a regex compiles) the whole document,
+        // so it is only redone when the query or the source changed, not on
+        // every frame the panel stays open.
+        if self.search_cache.query != self.search_query
+            || self.search_cache.revision != self.source_revision
+        {
+            let result = search_document(
+                &self.source,
+                &self.search_query,
+                SearchOptions {
+                    case_insensitive: true,
+                    regex: false,
+                    context: 24,
+                },
+            );
+            let matches = match result {
+                Ok(matches) => matches,
+                Err(err) => {
+                    self.status = err.to_string();
+                    Vec::new()
+                }
+            };
+            self.search_cache = SearchCache {
+                query: self.search_query.clone(),
+                revision: self.source_revision,
+                matches,
+            };
+        }
+
+        if self.search_cache.matches.is_empty() {
             ui.label(RichText::new("没有匹配").weak().color(palette.weak_text));
             return;
         }
+
+        // The rows are collected before they are drawn: drawing needs a
+        // mutable borrow of the app, and the matches live inside it.
+        let total = self.search_cache.matches.len();
+        let rows: Vec<(String, usize)> = self
+            .search_cache
+            .matches
+            .iter()
+            .take(50)
+            .map(|found| {
+                (
+                    marktext_core::search::context_of(&self.source, found, 24),
+                    found.start,
+                )
+            })
+            .collect();
+
         ui.label(
-            RichText::new(format!("{} 处匹配", matches.len()))
+            RichText::new(format!("{total} 处匹配"))
                 .weak()
                 .color(palette.weak_text),
         );
-        for found in matches.iter().take(50) {
-            let text = marktext_core::search::context_of(&self.source, found, 24);
-            let response = ui.add(
-                egui::Label::new(RichText::new(text.replace('\n', " ")).small())
-                    .sense(Sense::click()),
-            );
-            if response.clicked() {
-                self.status = format!("第 {} 字节处命中", found.start);
-            }
-        }
+        // The results get their own scroll area: without it, a query with many
+        // hits pushes the outline out of the side panel.
+        egui::ScrollArea::vertical()
+            .id_salt("search_results")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (text, start) in rows {
+                    let response = ui.add(
+                        egui::Label::new(RichText::new(text.replace('\n', " ")).small())
+                            .sense(Sense::click()),
+                    );
+                    if response.clicked() {
+                        self.status = format!("第 {} 字节处命中", start);
+                    }
+                }
+            });
     }
 
     /// Draw the document area.
@@ -638,18 +877,6 @@ impl MarkTextApp {
     fn preview_pane(&mut self, ui: &mut Ui, palette: Palette) {
         let mut headings = Vec::new();
 
-        // A heading picked in the outline is scrolled to by feeding the offset
-        // that was recorded during the previous layout back into the scroll
-        // area.
-        let mut scroll_area = ScrollArea::vertical().id_salt("preview_scroll");
-        if let Some(target) = &self.pending_scroll {
-            if let Some((_, position)) =
-                self.heading_offsets.iter().find(|(text, _)| text == target)
-            {
-                scroll_area = scroll_area.vertical_scroll_offset(position.y);
-            }
-        }
-
         let scale = self.scale;
         // The heights are only needed when the preview is drawn in windows.
         // They have to be worked out before the blocks are borrowed, because
@@ -657,6 +884,35 @@ impl MarkTextApp {
         if scale.is_large() {
             self.update_preview_heights(ui.available_width());
         }
+
+        // A heading picked in the outline is scrolled to by feeding the offset
+        // that was recorded during the previous layout back into the scroll
+        // area. The windowed preview has only drawn the headings that were on
+        // screen, so a heading further down is located through the estimated
+        // block heights instead.
+        let scroll_offset = self.pending_scroll.as_ref().and_then(|target| {
+            self.heading_offsets
+                .iter()
+                .find(|(text, _)| text == target)
+                .map(|(_, position)| position.y)
+                .or_else(|| {
+                    if scale.is_large() {
+                        preview::estimated_heading_offset(
+                            &self.document.blocks,
+                            &self.preview_heights,
+                            target,
+                        )
+                    } else {
+                        None
+                    }
+                })
+        });
+
+        let mut scroll_area = ScrollArea::vertical().id_salt("preview_scroll");
+        if let Some(offset) = scroll_offset {
+            scroll_area = scroll_area.vertical_scroll_offset(offset);
+        }
+
         let heights = if scale.is_large() {
             Some(&self.preview_heights[..])
         } else {
@@ -689,14 +945,18 @@ impl MarkTextApp {
 
     /// The estimated height of every block of the preview.
     ///
-    /// The heights only change when the width of the pane changes, so they
-    /// are kept instead of being worked out on every frame — counting the
-    /// characters of a large document costs as much as parsing it.
+    /// The heights change when the width of the pane changes and whenever the
+    /// document is parsed again: editing one paragraph keeps the block count
+    /// the same but changes the number of wrapped lines. Keying the cache on
+    /// the source revision is what keeps later blocks from being placed at a
+    /// stale offset after an ordinary edit.
     fn update_preview_heights(&mut self, width: f32) {
-        let blocks = self.document.blocks.len();
-        if (self.preview_width - width).abs() > 1.0 || self.preview_heights.len() != blocks {
+        if (self.preview_width - width).abs() > 1.0
+            || self.preview_heights_revision != self.source_revision
+        {
             self.preview_heights = preview::estimate_block_heights(&self.document.blocks, width);
             self.preview_width = width;
+            self.preview_heights_revision = self.source_revision;
         }
     }
 
@@ -773,7 +1033,7 @@ const WELCOME: &str = "# MarkText
 - 左侧大纲面板，标题可点击跳转
 - Markdown 源码编辑与实时渲染预览
 - 全文搜索、HTML 导出
-- 无损往返：`parse → serialize` 保持原文逐字节一致
+- 往返收敛：重复 `parse → serialize` 会得到相同结果
 
 ## 快捷键
 
@@ -784,7 +1044,7 @@ const WELCOME: &str = "# MarkText
 | `Ctrl+L` | 切换布局 |
 | `Ctrl+B` | 切换侧边栏 |
 
-> 引擎严格对齐原版 `packages/muya` 的架构：块树保存原始行内文本，因此未修改的文档可以无损往返。
+> 引擎严格对齐原版 `packages/muya` 的架构：块树保存原始行内文本，因此未修改的文档可以稳定往返。
 
 ```rust
 let blocks = marktext_core::parse(source)?;
@@ -795,7 +1055,7 @@ let markdown = marktext_core::serialize(&blocks, Default::default());
 
 - [x] 块级解析器
 - [x] 行内解析器
-- [x] 无损序列化
+- [x] 收敛式序列化
 - [ ] 实时协同编辑
 ";
 

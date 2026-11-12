@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use marktext_core::{
-    build_toc, parse_document, render_html, render_to_html, search_document, serialize,
+    build_toc, parse_document, render_html, render_to_html, search_document, serialize_document,
     ExportOptions, RenderOptions, SearchOptions,
 };
 
@@ -29,14 +29,18 @@ marktext —— MarkText Rust 引擎命令行工具
     --version                 显示版本号
 
 搜索选项：
-    --regex                   查询按正则解释
+    --query <查询>            查询内容（也可写作第二个位置参数）
+    --regex                   查询按正则表达式解释（RE2 语法）
     --case-sensitive          区分大小写
     --context <n>             每条命中附带上下文字符数
+    --                        其后的参数一律按位置参数处理
 
 示例：
     marktext parse README.md
     marktext html README.md --full > README.html
     marktext roundtrip README.md
+    marktext search README.md --query 强调 --context 12
+    marktext search README.md --regex '^#{1,6} '
 ";
 
 fn main() -> ExitCode {
@@ -230,7 +234,7 @@ fn cmd_roundtrip(args: &[String]) -> Result<(), String> {
     let path = path.ok_or_else(|| "缺少文件路径".to_string())?;
     let source = read_source(&path)?;
     let document = parse_document(&source).map_err(|err| format!("解析失败：{err}"))?;
-    let output = serialize(&document.blocks, ExportOptions::default());
+    let output = serialize_document(&document, ExportOptions::default());
 
     if let Some(target) = output_path {
         fs::write(&target, output.as_bytes())
@@ -278,13 +282,32 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
     let mut regex = false;
     let mut case_insensitive = true;
     let mut context = 0usize;
+    let mut query_option: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
+    let mut options_ended = false;
 
     let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
+        let arg = args[index].as_str();
+        if options_ended {
+            positional.push(arg);
+            index += 1;
+            continue;
+        }
+        match arg {
+            "--" => options_ended = true,
             "--regex" => regex = true,
             "--case-sensitive" => case_insensitive = false,
+            "--query" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--query 缺少查询内容".to_string())?;
+                query_option = Some(value.clone());
+            }
+            other if other.starts_with("--query=") => {
+                query_option = Some(other["--query=".len()..].to_string());
+            }
             "--context" => {
                 index += 1;
                 let value = args
@@ -302,11 +325,18 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
         index += 1;
     }
 
-    if positional.len() < 2 {
-        return Err("用法：marktext search <文件> <查询>".to_string());
-    }
-    let path = positional[0];
-    let query = positional[1];
+    // The query can be given as the second positional argument, the way the
+    // usage line shows, or with `--query` so that a query beginning with a
+    // dash does not have to be escaped.
+    let (path, query) = match positional.as_slice() {
+        [path, query] if query_option.is_none() => (*path, (*query).to_string()),
+        [path] => (
+            *path,
+            query_option.ok_or_else(|| "用法：marktext search <文件> <查询>".to_string())?,
+        ),
+        [] => return Err("用法：marktext search <文件> <查询>".to_string()),
+        _ => return Err("参数过多，请只指定一个文件和一条查询".to_string()),
+    };
 
     let source = read_source(path)?;
     let options = SearchOptions {
@@ -314,7 +344,7 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
         regex,
         context,
     };
-    let matches = search_document(&source, query, options);
+    let matches = search_document(&source, &query, options).map_err(|err| err.to_string())?;
 
     let json: Vec<_> = matches
         .iter()

@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use marktext_core::{parse_document, serialize, BlockKind, ExportOptions};
+use marktext_core::{parse_document, serialize, serialize_document, BlockKind, ExportOptions};
 
 /// The fixtures of this crate.
 fn fixtures_dir() -> PathBuf {
@@ -124,4 +124,21 @@ fn round_trip_keeps_the_block_structure() {
         "以下夹具的往返改变了文档结构：\n\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn reference_definitions_survive_the_document_round_trip() {
+    // `serialize` only receives the blocks, so it cannot write the reference
+    // definitions the parser keeps beside them. `serialize_document` must.
+    let source = "[foo]: /url \"title\"\n\nsee [foo]\n";
+    let document = parse_document(source).expect("valid markdown");
+    let output = serialize_document(&document, ExportOptions::default());
+    assert!(output.contains("[foo]: /url \"title\""), "{output}");
+
+    let reparsed = parse_document(&output).expect("the output must parse again");
+    assert_eq!(reparsed.references, document.references);
+
+    // The definitions are appended at the end, so the second pass is stable.
+    let second = serialize_document(&reparsed, ExportOptions::default());
+    assert_eq!(second, output);
 }

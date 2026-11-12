@@ -472,15 +472,18 @@ fn scan(text: &str, options: InlineOptions) -> Vec<Inline> {
                 // break as well.
                 let backslash = end > text_start && text.as_bytes()[end - 1] == b'\\';
                 let is_hard = spaces >= 2 || backslash;
-                flush_text!(if backslash { end - 1 } else { end });
+                let break_start = if backslash { end - 1 } else { end };
+                flush_text!(break_start);
+                // The break itself is the source from the end of the text
+                // (including the trailing spaces or the backslash) through
+                // the newline. It must not be taken from `text_start`: that
+                // still points at the beginning of the line, which used to
+                // duplicate the whole line in the preview.
+                let raw = text[break_start..=index].to_string();
                 if is_hard {
-                    tokens.push(Inline::HardBreak {
-                        raw: text[text_start..index].to_string(),
-                    });
+                    tokens.push(Inline::HardBreak { raw });
                 } else {
-                    tokens.push(Inline::SoftBreak {
-                        raw: text[text_start..index].to_string(),
-                    });
+                    tokens.push(Inline::SoftBreak { raw });
                 }
                 index += 1;
                 text_start = index;
@@ -960,8 +963,9 @@ pub(crate) fn scan_raw_html_tag(text: &str, start: usize) -> Option<usize> {
 
         // The name of the attribute.
         let attribute_start = index;
-        while index < bytes.len() && bytes[index].is_ascii_alphanumeric()
-            || matches!(bytes[index], b'_' | b'.' | b':' | b'-')
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric()
+                || matches!(bytes[index], b'_' | b'.' | b':' | b'-'))
         {
             index += 1;
         }
@@ -1038,9 +1042,20 @@ fn parse_emoji(text: &str, start: usize) -> Option<(Inline, usize)> {
         return None;
     }
     let name = &rest[..end];
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-')
+    if name.len() < 2
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-')
+    {
+        return None;
+    }
+    // `12:30:45` and similar times are not emoji shortcodes. A digit-only
+    // name between two digits is far more likely to be a clock than `:100:`.
+    let before = text[..start].chars().next_back();
+    let after = text[start + end + 2..].chars().next();
+    if name.chars().all(|c| c.is_ascii_digit())
+        && before.is_some_and(|c| c.is_ascii_digit())
+        && after.is_some_and(|c| c.is_ascii_digit())
     {
         return None;
     }
@@ -1206,7 +1221,7 @@ fn parse_link(text: &str, start: usize, options: &InlineOptions) -> Option<(Inli
     let after_label = info.end;
     let label = info.label.trim();
 
-    if label.starts_with('^') && label.len() > 1 {
+    if options.footnote && label.starts_with('^') && label.len() > 1 {
         return Some((
             Inline::Footnote {
                 identifier: label[1..].to_string(),
@@ -1589,20 +1604,14 @@ fn parse_link_destination(text: &str, start: usize) -> Option<(String, Option<St
 /// Remove the emphasis markers from an image's alt text.
 fn strip_emphasis_markers(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let ch = bytes[index];
-        if matches!(ch, b'*' | b'_' | b'~' | b'=') {
-            let run = count_run(bytes, index, ch);
-            let total = bytes.iter().filter(|b| **b == ch).count();
+    for character in text.chars() {
+        if matches!(character, '*' | '_' | '~' | '=') {
+            let total = text.chars().filter(|other| *other == character).count();
             if total >= 2 {
-                index += run;
                 continue;
             }
         }
-        out.push(ch as char);
-        index += 1;
+        out.push(character);
     }
     out
 }
@@ -1987,5 +1996,24 @@ mod tests {
     fn unclosed_emphasis_stays_text() {
         let tokens = parse("*not closed", InlineOptions::default());
         assert_eq!(kinds(&tokens), vec!["text"]);
+    }
+
+    #[test]
+    fn a_break_carries_only_its_own_source() {
+        // The break used to be built from `text_start`, which still pointed at
+        // the beginning of the line: the token then carried the whole line,
+        // and the preview drew the line twice.
+        let soft = parse("alpha\nbeta", InlineOptions::default());
+        assert_eq!(kinds(&soft), vec!["text", "softbreak", "text"]);
+        match &soft[1] {
+            Inline::SoftBreak { raw } => assert_eq!(raw, "\n"),
+            other => panic!("expected a soft break, got {other:?}"),
+        }
+
+        let hard = parse("alpha  \nbeta", InlineOptions::default());
+        match &hard[1] {
+            Inline::HardBreak { raw } => assert_eq!(raw, "  \n"),
+            other => panic!("expected a hard break, got {other:?}"),
+        }
     }
 }

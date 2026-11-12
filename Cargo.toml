@@ -8,15 +8,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/marktext/marktext"
+repository = "https://github.com/yaoyongli1974-dotcom/marktext-rust"
 description = "Rust port of the MarkText markdown editor engine"
 
 [workspace.dependencies]
-marktext-core = { path = "crates/marktext-core", version = "0.1.1" }
+marktext-core = { path = "crates/marktext-core", version = "0.2.0" }
 
 [profile.release]
 opt-level = 3

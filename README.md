@@ -3,7 +3,8 @@
 MarkText（`packages/muya`）核心编辑引擎的 Rust 移植。目标不是「再写一个 Markdown 库」，
 而是**逐条复刻原版的解析与序列化契约**，让 MarkText 桌面端可以直接换掉 Electron/JS 内核。
 
-原版参考仓库：`https://github.com/marktext/marktext`（只读克隆在本机 `D:/workbuddy/marktext-src`）。
+原版参考仓库：`https://github.com/marktext/marktext`。行为对齐的基准是上游
+`packages/muya` 的源码与其测试套件，而不是某个二次实现的猜测。
 
 ---
 
@@ -56,7 +57,7 @@ cargo build --release -p marktext-cli -p marktext-app
 | 规范套件 | 用例数 | 通过 | 失败 | 说明 |
 | :--- | ---: | ---: | ---: | :--- |
 | CommonMark 0.31.2 | 652 | **652** | 0 | 全量通过 |
-| GFM 0.29（`cmark-gfm`） | 672 | 661 | 9 | 全部为强调算法的版本冲突，见下 |
+| GFM 0.29（`cmark-gfm`） | 672 | 661 | 9 | 全部为强调算法的版本冲突，见下；另有 2 条被参考实现标记为 `disabled`，不计入 |
 
 对照：上一轮在同一台机器上实测，原版 `packages/muya` 跑同一套用例是
 **CommonMark 59 失败 / GFM 72 失败**。
@@ -187,6 +188,11 @@ HTML 块内部是**逐个 `<` 扫描**的 —— 块里的 `<blockquote>` 不受
 # 全部测试（规范 + 往返 + 单元）
 cargo test --workspace
 
+# 与 CI 相同的门禁：格式、静态检查、全目标构建
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --all-targets
+
 # 规范套件（含回归锁校验）
 cargo test -p marktext-core --test spec
 
@@ -202,6 +208,8 @@ MARKTEXT_UPDATE_EXPECTED_FAILURES=1 cargo test -p marktext-core --test spec gfm_
 cargo run -p marktext-cli -- html  README.md
 cargo run -p marktext-cli -- toc   README.md --text
 cargo run -p marktext-cli -- roundtrip README.md
+cargo run -p marktext-cli -- search README.md --query 强调 --context 12
+cargo run -p marktext-cli -- search README.md --regex '^#{1,6} '
 ```
 
 > **注意**：`cargo test --workspace` **不会**编译 `marktext-app`（它的 bin 设了
@@ -257,7 +265,12 @@ MARKTEXT_LARGE_DOCUMENT=/path/to/big.md   cargo test -p marktext-app --test larg
 | 项 | 状态 |
 | :--- | :--- |
 | GFM 强调的 9 条版本冲突用例 | 不可修复，已登记在回归锁 |
-| 正则搜索 | 未实现，退化为字面量搜索（`search_regex` 会降级） |
+| 正则搜索的语法 | 使用 `regex` crate 的 RE2 子集，不支持反向引用与环视 |
+| 正则搜索的锚点 | `^` / `$` 按行锚定（与编辑器的查找面板一致） |
 | 嵌套片段里的制表符 | 会被物化成空格，往返不再逐字节一致（收敛性仍成立） |
 | 列表项内多余缩进的规范化 | 序列化器会重排缩进，往返不保证逐字节一致 |
 | 大文档预览的滚动条长度 | 按估算高度计算，与实际内容有少量偏差 |
+| 表格行里超出表头的单元格 | 渲染与序列化都按表头列数截断，源内容会丢失 |
+| 大文档分块的边界 | 两段之间的换行不属于任何 `TextEdit`，无法用退格/删除合并 |
+| 预览里的粗体 | 未注册粗体字族，`**strong**` 与正文同宽 |
+| pandoc 花式列表 | 解析器尚未读取 `fancy_lists`，`A.`/`i.` 仍按段落处理 |

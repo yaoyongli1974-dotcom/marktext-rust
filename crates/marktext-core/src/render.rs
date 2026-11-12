@@ -162,7 +162,7 @@ fn render_block(block: &Block, out: &mut String, options: &RenderOptions, tight:
         BlockKind::Table => render_table(block, out, options),
         BlockKind::TableRow | BlockKind::TableCell => {}
         BlockKind::Frontmatter => {
-            let lang = block.frontmatter_lang.as_deref().unwrap_or("yaml");
+            let lang = escape_html_text(block.frontmatter_lang.as_deref().unwrap_or("yaml"));
             out.push_str(&format!(
                 "<pre class=\"front-matter\" data-lang=\"{lang}\">"
             ));
@@ -171,6 +171,7 @@ fn render_block(block: &Block, out: &mut String, options: &RenderOptions, tight:
         }
         BlockKind::Footnote => {
             let identifier = block.identifier.as_deref().unwrap_or("");
+            let identifier = escape_html_text(identifier);
             out.push_str(&format!(
                 "<div class=\"footnote\" id=\"fn-{identifier}\">\n"
             ));
@@ -185,7 +186,7 @@ fn render_code_block(block: &Block, out: &mut String, options: &RenderOptions) {
     let info = crate::parser::clean_info_string(&block.lang.clone().unwrap_or_default());
     let language = info.split_whitespace().next().unwrap_or("").to_string();
     let class = if options.highlight_code && !language.is_empty() {
-        format!(" class=\"language-{language}\"")
+        format!(" class=\"language-{}\"", escape_html_text(&language))
     } else {
         String::new()
     };
@@ -263,7 +264,26 @@ fn render_list(block: &Block, out: &mut String, tag: &str, options: &RenderOptio
 
 /// Render a task list, adding the checkbox inputs.
 fn render_task_list(block: &Block, out: &mut String, options: &RenderOptions) {
-    out.push_str("<ul class=\"contains-task-list\">\n");
+    // A task list can be ordered (`1. [ ] a`), in which case the number and
+    // style of the marker has to be kept just like for an ordinary list.
+    let ordered = block.list.as_ref().and_then(|meta| meta.style).is_some();
+    let tag = if ordered { "ol" } else { "ul" };
+    let mut attributes = String::new();
+    if ordered {
+        let start = block.list.as_ref().and_then(|meta| meta.start).unwrap_or(1);
+        if start != 1 {
+            attributes.push_str(&format!(" start=\"{start}\""));
+        }
+        if let Some(style) = block.list.as_ref().and_then(|meta| meta.style) {
+            if style != ListStyle::Decimal {
+                attributes.push_str(&format!(" type=\"{}\"", ordered_list_type(style)));
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "<{tag} class=\"contains-task-list\"{attributes}>\n"
+    ));
     let tight = !block.list.as_ref().map(|meta| meta.loose).unwrap_or(false);
     for item in block.children() {
         out.push_str("<li class=\"task-list-item\">");
@@ -275,7 +295,7 @@ fn render_task_list(block: &Block, out: &mut String, options: &RenderOptions) {
         render_blocks(item.children(), out, options, tight);
         out.push_str("</li>\n");
     }
-    out.push_str("</ul>\n");
+    out.push_str(&format!("</{tag}>\n"));
 }
 
 /// The text of an ATX heading without its markers.
@@ -536,6 +556,7 @@ fn render_inline_token(token: &Inline, out: &mut String, options: &RenderOptions
         Inline::HardBreak { .. } => out.push_str("<br>\n"),
         Inline::SoftBreak { .. } => out.push('\n'),
         Inline::Footnote { identifier } => {
+            let identifier = escape_html_text(identifier);
             out.push_str(&format!(
                 "<sup class=\"footnote-ref\"><a href=\"#fn-{identifier}\" id=\"fnref-{identifier}\">{identifier}</a></sup>"
             ));

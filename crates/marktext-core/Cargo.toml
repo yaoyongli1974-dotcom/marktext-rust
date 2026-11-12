@@ -8,9 +8,9 @@ repository.workspace = true
 description = "Markdown engine core: block/inline parsing, lossless serialization, HTML rendering"
 
 [dependencies]
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-regex = "1"
 serde_json = "1"

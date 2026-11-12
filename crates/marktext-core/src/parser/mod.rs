@@ -102,6 +102,7 @@ pub fn parse_document_with_options(
         pos: 0,
         options,
         definitions: Vec::new(),
+        depth: 0,
     };
 
     let mut blocks = Vec::new();
@@ -214,7 +215,18 @@ struct BlockParser<'a> {
     options: ParseOptions,
     /// The link reference definitions the document holds.
     definitions: Vec<ReferenceDefinition>,
+    /// How deeply this fragment is nested in quotes and lists.
+    depth: usize,
 }
+
+/// The deepest nesting of quotes and lists that is parsed as structure.
+///
+/// Each level recurses through the block parser, the renderer, the serializer
+/// and the outline builder; without a limit a source of a few hundred nested
+/// `>` markers overflows the stack and aborts the process (the release profile
+/// uses `panic = "abort"`). Deeper content is kept as a paragraph instead, so
+/// the text is not lost.
+const MAX_NESTING: usize = 100;
 
 /// Expand tabs to the next multiple of four, as CommonMark requires.
 ///
@@ -385,6 +397,14 @@ impl<'a> BlockParser<'a> {
                 out.push(block);
                 continue;
             }
+            // A footnote definition also starts with `[`, and its label starts
+            // with `^`; it has to be tried before the link reference
+            // definition, which would otherwise swallow it as a definition for
+            // the label `^1`.
+            if let Some(block) = self.parse_footnote_definition() {
+                out.push(block);
+                continue;
+            }
             // A link reference definition produces no block of its own.
             //
             // It is tried before the setext heading on purpose: the line
@@ -394,10 +414,6 @@ impl<'a> BlockParser<'a> {
                 continue;
             }
             if let Some(block) = self.parse_setext_heading() {
-                out.push(block);
-                continue;
-            }
-            if let Some(block) = self.parse_footnote_definition() {
                 out.push(block);
                 continue;
             }
@@ -1354,6 +1370,15 @@ impl<'a> BlockParser<'a> {
 
     /// Parse a nested Markdown fragment into blocks.
     fn parse_sub_blocks(&mut self, lines: Vec<FragmentLine>) -> Vec<Block> {
+        if self.depth + 1 > MAX_NESTING {
+            // Keep the text instead of recursing until the stack runs out.
+            let text = lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return vec![Block::leaf(BlockKind::Paragraph, text)];
+        }
         let (blocks, definitions) = self.parse_fragment(lines);
         // A definition inside a list item or a quote belongs to the document.
         self.definitions.extend(definitions);
@@ -1366,6 +1391,9 @@ impl<'a> BlockParser<'a> {
     /// The method is used to look at the structure of a fragment without
     /// changing the document: the definitions of the probe are thrown away.
     fn parse_probe_blocks(&mut self, lines: Vec<FragmentLine>) -> Vec<Block> {
+        if self.depth + 1 > MAX_NESTING {
+            return Vec::new();
+        }
         self.parse_fragment(lines).0
     }
 
@@ -1382,6 +1410,7 @@ impl<'a> BlockParser<'a> {
             pos: 0,
             options: self.options,
             definitions: Vec::new(),
+            depth: self.depth + 1,
         };
         let mut blocks = Vec::new();
         nested.parse_blocks(&mut blocks);
@@ -2555,5 +2584,29 @@ mod tests {
     #[test]
     fn rejects_null_bytes() {
         assert!(parse("a\0b").is_err());
+    }
+
+    #[test]
+    fn deep_nesting_stops_at_the_limit_instead_of_overflowing() {
+        // A few hundred levels used to abort the process with a stack
+        // overflow; the deepest levels are kept as text.
+        let source = format!("{} x\n", ">".repeat(600));
+        let blocks = parse(&source).expect("deep nesting must still parse");
+        assert!(!blocks.is_empty());
+    }
+
+    #[test]
+    fn footnote_definitions_are_not_swallowed_by_link_references() {
+        let options = ParseOptions {
+            footnote: true,
+            ..ParseOptions::default()
+        };
+        let document = parse_document_with_options("[^1]: note\n\nsee [^1]\n", options)
+            .expect("valid markdown");
+        assert!(document
+            .blocks
+            .iter()
+            .any(|block| block.kind == BlockKind::Footnote));
+        assert!(document.references.is_empty());
     }
 }

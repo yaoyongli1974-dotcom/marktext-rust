@@ -52,7 +52,7 @@ fn collect(
             BlockKind::AtxHeading | BlockKind::SetextHeading => {
                 let level = block.level.unwrap_or(1).clamp(1, 6);
                 let raw = heading_text(block);
-                let content = plain_text(&raw);
+                let content = heading_plain_text(block);
                 let content_html = heading_html(&raw);
 
                 let base = slugify(&content);
@@ -86,6 +86,15 @@ fn heading_text(block: &Block) -> String {
         }
         _ => text.trim().to_string(),
     }
+}
+
+/// The plain text of a heading, with the inline markup removed.
+///
+/// This is the same text the outline shows, so the preview can anchor a
+/// heading by it and a click in the outline finds the heading even when it
+/// contains emphasis, code or a link.
+pub fn heading_plain_text(block: &Block) -> String {
+    plain_text(&heading_text(block))
 }
 
 /// The plain text of a heading, with the inline markup removed.

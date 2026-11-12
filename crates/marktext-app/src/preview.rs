@@ -8,6 +8,7 @@
 
 use egui::{Align, Color32, Layout, RichText, Sense, Stroke, TextFormat, Ui, Vec2};
 use marktext_core::document::{Align as CellAlign, Block, BlockKind};
+use marktext_core::heading_plain_text;
 use marktext_core::inline::{Inline, InlineOptions};
 
 use crate::theme::Palette;
@@ -170,6 +171,40 @@ pub fn visible_block_range(heights: &[f32], top: f32, bottom: f32) -> std::ops::
     first..(last + 1)
 }
 
+/// The estimated vertical position of a heading.
+///
+/// The windowed preview only walks the blocks that are on screen, so
+/// `headings` cannot hold the position of a heading far down the document.
+/// The estimate is built from the cached block heights instead: a top-level
+/// heading is placed exactly, and a heading nested in a list or a quote is
+/// placed at the top of the container it lives in.
+pub fn estimated_heading_offset(blocks: &[Block], heights: &[f32], target: &str) -> Option<f32> {
+    let mut y = 0.0f32;
+    for (index, block) in blocks.iter().enumerate() {
+        if is_heading(block) && heading_plain_text(block) == target {
+            return Some(y);
+        }
+        if contains_heading(block, target) {
+            return Some(y);
+        }
+        y += heights.get(index).copied().unwrap_or(0.0);
+    }
+    None
+}
+
+/// Whether a block is a heading.
+fn is_heading(block: &Block) -> bool {
+    matches!(block.kind, BlockKind::AtxHeading | BlockKind::SetextHeading)
+}
+
+/// Whether a block or one of its descendants is a heading with this text.
+fn contains_heading(block: &Block, target: &str) -> bool {
+    block.children().iter().any(|child| {
+        (is_heading(child) && heading_plain_text(child) == target)
+            || contains_heading(child, target)
+    })
+}
+
 /// Draw the blocks that lie inside the visible window only.
 ///
 /// `heights` holds the estimated height of every block. It is used to place
@@ -322,6 +357,7 @@ fn draw_heading(
         _ => 15.0,
     };
     let text = heading_text(block);
+    let anchor = heading_plain_text(block);
     let mut job = inline_job(
         &text,
         palette,
@@ -340,7 +376,7 @@ fn draw_heading(
 
     // The heading is anchored by its plain text, which is what the outline
     // panel shows as well.
-    headings.push((text, response.rect.min.to_vec2()));
+    headings.push((anchor, response.rect.min.to_vec2()));
 }
 
 /// The text of a heading without its markers.
@@ -378,7 +414,13 @@ fn draw_code_block(ui: &mut Ui, block: &Block, palette: &Palette) {
         // The code block is drawn verbatim — no inline syntax is applied to it.
         let format = format_for(InlineStyle::code(BODY_SIZE), palette);
         let mut job = egui::text::LayoutJob::default();
-        for line in block.text().split('\n') {
+        // `LayoutJob::append` concatenates runs without inserting a break, so
+        // the line break between the lines has to be appended explicitly;
+        // otherwise a multi-line block is drawn as one long line.
+        for (index, line) in block.text().split('\n').enumerate() {
+            if index > 0 {
+                job.append("\n", 0.0, format.clone());
+            }
             job.append(line, 0.0, format.clone());
         }
         job.wrap.max_width = ui.available_width();
@@ -695,7 +737,10 @@ fn draw_table(ui: &mut Ui, block: &Block, palette: &Palette, inline_options: &In
         .stroke(Stroke::new(1.0_f32, palette.table_border))
         .inner_margin(egui::Margin::same(8));
     frame.show(ui, |ui| {
-        egui::Grid::new("preview_table")
+        // egui keeps the column widths under the grid id, so every table needs
+        // an id of its own; otherwise the second table inherits the widths of
+        // the first one.
+        egui::Grid::new(("preview_table", block.text()))
             .striped(true)
             .spacing(egui::vec2(12.0, 6.0))
             .show(ui, |ui| {
@@ -1011,11 +1056,13 @@ fn append_token(
         Inline::Escape { content, .. } => {
             job.append(content, 0.0, format_for(style, palette));
         }
-        Inline::HardBreak { raw } => {
-            job.append(raw, 0.0, format_for(style, palette));
+        Inline::HardBreak { .. } => {
+            job.append("\n", 0.0, format_for(style, palette));
         }
-        Inline::SoftBreak { raw } => {
-            job.append(raw, 0.0, format_for(style, palette));
+        Inline::SoftBreak { .. } => {
+            // A soft break is a space in rendered HTML; drawing the source
+            // newline here would break the line in the preview.
+            job.append(" ", 0.0, format_for(style, palette));
         }
         Inline::Footnote { identifier } => {
             let footnote_style = InlineStyle {

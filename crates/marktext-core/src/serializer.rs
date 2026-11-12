@@ -52,6 +52,53 @@ pub fn serialize(blocks: &[Block], options: ExportOptions) -> String {
     writer.write_blocks(blocks, "", "", false)
 }
 
+/// Serialize a whole document, including its reference definitions.
+///
+/// Link reference definitions are not blocks: the parser keeps them in
+/// `Document::references` because they apply to the whole document. Writing
+/// only the blocks therefore dropped every `[label]: destination` line.
+/// The definitions are appended at the end, where they still apply to every
+/// reference; their original position among the blocks is not kept.
+pub fn serialize_document(document: &crate::document::Document, options: ExportOptions) -> String {
+    let mut output = serialize(&document.blocks, options);
+    if document.references.is_empty() {
+        return output;
+    }
+
+    if !output.is_empty() {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        if !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+    }
+
+    for reference in &document.references {
+        write_reference_definition(reference, &mut output);
+    }
+    output
+}
+
+/// Write one link reference definition.
+fn write_reference_definition(reference: &crate::inline::ReferenceDefinition, output: &mut String) {
+    output.push('[');
+    output.push_str(&reference.label);
+    output.push_str("]: ");
+    output.push_str(&reference.href);
+    if let Some(title) = &reference.title {
+        output.push_str(" \"");
+        for character in title.chars() {
+            if matches!(character, '"' | '\\') {
+                output.push('\\');
+            }
+            output.push(character);
+        }
+        output.push('"');
+    }
+    output.push('\n');
+}
+
 /// The metadata of the list currently being written.
 #[derive(Debug, Clone)]
 struct WrittenList {
@@ -779,12 +826,26 @@ fn write_math_block(block: &Block, indent: &str) -> String {
 /// Write a diagram block.
 fn write_diagram_block(block: &Block, indent: &str) -> String {
     let mut result = String::new();
+    let text = block.text();
     let diagram_type = block.diagram_type.as_deref().unwrap_or("mermaid");
-    result.push_str(&format!("{indent}```{diagram_type}\n"));
-    for line in block.text().split('\n') {
+    // A backtick fence's info string may not contain a backtick, and the
+    // opening fence has to be longer than any run of the fence character in
+    // the body; otherwise a diagram whose body contains a fence would be
+    // written as markdown that no longer reads back as one diagram.
+    let fence_char = if diagram_type.contains('`') {
+        FenceChar::Tilde
+    } else {
+        FenceChar::Backtick
+    };
+    let fence: String = fence_char
+        .as_char()
+        .to_string()
+        .repeat(code_fence_length(text, None, fence_char));
+    result.push_str(&format!("{indent}{fence}{diagram_type}\n"));
+    for line in text.split('\n') {
         result.push_str(&format!("{indent}{line}\n"));
     }
-    result.push_str(&format!("{indent}```\n"));
+    result.push_str(&format!("{indent}{fence}\n"));
     result
 }
 

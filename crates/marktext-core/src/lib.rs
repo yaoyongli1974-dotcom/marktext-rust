@@ -28,9 +28,9 @@ pub use parser::{
     ParseOptions,
 };
 pub use render::{render_html, render_to_html, RenderOptions};
-pub use search::{search_document, SearchMatch, SearchOptions};
-pub use serializer::{serialize, ExportOptions};
-pub use toc::{build_toc, TocItem};
+pub use search::{search_document, SearchError, SearchMatch, SearchOptions};
+pub use serializer::{serialize, serialize_document, ExportOptions};
+pub use toc::{build_toc, heading_plain_text, TocItem};
 
 /// Parse a Markdown document and keep the source it came from.
 pub fn parse_document(markdown: &str) -> Result<Document, ParseError> {
