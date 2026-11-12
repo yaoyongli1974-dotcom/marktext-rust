@@ -783,8 +783,12 @@ fn write_code_block(block: &Block, indent: &str) -> String {
     } else {
         result.push_str(&format!("{indent}{fence}{info}\n"));
     }
-    for line in text.split('\n') {
-        result.push_str(&format!("{indent}{line}\n"));
+    // `split` yields one empty line for an empty body; writing it would add a
+    // blank line that was not in canonical Markdown.
+    if !text.is_empty() {
+        for line in text.split('\n') {
+            result.push_str(&format!("{indent}{line}\n"));
+        }
     }
     result.push_str(&format!("{indent}{fence}\n"));
     result
@@ -890,6 +894,13 @@ fn write_table(block: &Block, indent: &str) -> String {
                 line.push(' ');
             }
             line.push('|');
+        }
+        // Cells beyond the header's columns are ignored by GFM renderers, but
+        // they are part of the source and have to be written back.
+        for cell in row.iter().skip(columns) {
+            line.push(' ');
+            line.push_str(cell);
+            line.push_str(" |");
         }
         result.push_str(&line);
         result.push('\n');

@@ -777,7 +777,7 @@ impl<'a> BlockParser<'a> {
                 let probe = self.parse_probe_blocks(inner_lines.clone());
                 innermost_block_is_paragraph(&probe)
             };
-            if !ends_with_paragraph || line_starts_block(&line, true) {
+            if !ends_with_paragraph || line_starts_block(&line, true, self.options.fancy_lists) {
                 self.pos -= 1;
                 break;
             }
@@ -849,9 +849,12 @@ impl<'a> BlockParser<'a> {
                 break;
             }
             let mut cells = split_table_row(line.content);
-            // A row with fewer cells gets empty ones, a row with more cells
-            // loses the excess.
-            cells.resize(columns, String::new());
+            // A row with fewer cells gets empty ones. A row with more cells
+            // keeps them: GFM renders only the header's columns, but the
+            // extra source must survive a round trip.
+            if cells.len() < columns {
+                cells.resize(columns, String::new());
+            }
             rows.push(cells);
             self.pos += 1;
         }
@@ -1053,7 +1056,7 @@ impl<'a> BlockParser<'a> {
                 break;
             }
             // A line that starts another block interrupts the paragraph.
-            if !body.is_empty() && line_starts_block(&line, true) {
+            if !body.is_empty() && line_starts_block(&line, true, self.options.fancy_lists) {
                 self.pos -= 1;
                 break;
             }
@@ -1088,7 +1091,7 @@ impl<'a> BlockParser<'a> {
     /// Whether the current line starts a block other than a paragraph.
     fn line_starts_block(&self) -> bool {
         match self.peek_line() {
-            Some(line) => line_starts_block(&line, false),
+            Some(line) => line_starts_block(&line, false, self.options.fancy_lists),
             None => false,
         }
     }
@@ -1100,7 +1103,7 @@ impl<'a> BlockParser<'a> {
             return None;
         }
         // The marker decides which flavour of list this is.
-        list_marker_at_start(line.content)?;
+        list_marker_at_start(line.content, self.options.fancy_lists)?;
         let mut items: Vec<Block> = Vec::new();
         let mut ordered = false;
         let mut bullet_marker: Option<String> = None;
@@ -1123,7 +1126,8 @@ impl<'a> BlockParser<'a> {
             if line.indent_width() >= 4 {
                 break;
             }
-            let Some(item_marker) = list_marker_at_start(line.content) else {
+            let Some(item_marker) = list_marker_at_start(line.content, self.options.fancy_lists)
+            else {
                 break;
             };
 
@@ -1237,7 +1241,8 @@ impl<'a> BlockParser<'a> {
                     let next_is_item = next
                         .map(|l| {
                             next_indent < content_indent
-                                && list_marker_at_start(l.content).is_some()
+                                && list_marker_at_start(l.content, self.options.fancy_lists)
+                                    .is_some()
                         })
                         .unwrap_or(false);
                     if next_is_item {
@@ -1270,7 +1275,9 @@ impl<'a> BlockParser<'a> {
                         text: stripped,
                         base: line.base,
                     });
-                } else if line.indent_width() < 4 && list_marker_at_start(line.content).is_some() {
+                } else if line.indent_width() < 4
+                    && list_marker_at_start(line.content, self.options.fancy_lists).is_some()
+                {
                     // A line that is indented by four columns or more starts
                     // an indented code block, which never interrupts a
                     // paragraph; it continues the item instead.
@@ -2115,8 +2122,8 @@ fn marker_padding(content: &str, marker_len: usize, base: usize) -> Option<ItemG
 /// An empty list item never interrupts a paragraph, and an ordered list only
 /// does so when it starts with `1` — the two rules the specification states
 /// for a list that interrupts a paragraph.
-fn list_marker_interrupts_paragraph(content: &str) -> bool {
-    let Some(marker) = list_marker_at_start(content) else {
+fn list_marker_interrupts_paragraph(content: &str, fancy: bool) -> bool {
+    let Some(marker) = list_marker_at_start(content, fancy) else {
         return false;
     };
     // The item has to hold something else than the marker itself.
@@ -2142,7 +2149,7 @@ fn list_marker_interrupts_paragraph(content: &str) -> bool {
 /// While a paragraph is being read, `in_paragraph` is set: an indented code
 /// block can never interrupt a paragraph, so the indentation is ignored in
 /// that case and the line simply continues the paragraph.
-fn line_starts_block(line: &Line<'_>, in_paragraph: bool) -> bool {
+fn line_starts_block(line: &Line<'_>, in_paragraph: bool, fancy: bool) -> bool {
     if line.indent_width() >= 4 {
         return !in_paragraph;
     }
@@ -2174,10 +2181,10 @@ fn line_starts_block(line: &Line<'_>, in_paragraph: bool) -> bool {
     ) {
         return true;
     }
-    if list_marker_at_start(content).is_some() {
+    if list_marker_at_start(content, fancy).is_some() {
         // A list interrupts a paragraph only when its item is not empty and,
         // for an ordered list, when it starts with `1`.
-        return !in_paragraph || list_marker_interrupts_paragraph(content);
+        return !in_paragraph || list_marker_interrupts_paragraph(content, fancy);
     }
     false
 }
@@ -2226,7 +2233,7 @@ fn is_setext_underline(content: &str) -> bool {
 }
 
 /// Detect a list marker at the start of a line.
-fn list_marker_at_start(content: &str) -> Option<ListMarkerKind> {
+fn list_marker_at_start(content: &str, fancy: bool) -> Option<ListMarkerKind> {
     let bytes = content.as_bytes();
     if bytes.is_empty() {
         return None;
@@ -2275,6 +2282,41 @@ fn list_marker_at_start(content: &str) -> Option<ListMarkerKind> {
                 marker: marker.to_string(),
                 task,
             });
+        }
+    }
+
+    // Pandoc-style alphabetic and roman markers. They are only recognized
+    // when the option is on: at the start of a line `A. Smith` is prose much
+    // more often than it is a list.
+    if fancy {
+        let (end, body) = if content.starts_with('(') {
+            let close = content.find(')')?;
+            let inner = &content[1..close];
+            if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return None;
+            }
+            (close + 1, inner)
+        } else {
+            let run = content
+                .bytes()
+                .take_while(|b| b.is_ascii_alphabetic())
+                .count();
+            let delimiter = *content.as_bytes().get(run)?;
+            if run == 0 || !matches!(delimiter, b'.' | b')') {
+                return None;
+            }
+            (run + 1, &content[..run])
+        };
+        let marker = &content[..end];
+        if let Some(parsed) = parse_list_marker(marker, None) {
+            if parsed.style != ListStyle::Decimal && !body.is_empty() {
+                let offset = marker_padding(content, end, 0)?.offset;
+                let rest = &content[offset..];
+                return Some(ListMarkerKind::Ordered {
+                    marker: marker.to_string(),
+                    task: read_task_checkbox(rest),
+                });
+            }
         }
     }
 

@@ -329,16 +329,20 @@ fn render_table(block: &Block, out: &mut String, options: &RenderOptions) {
     out.push_str("<table>\n");
     let rows = block.children();
     // The first row holds the header of the table, the rest are its body.
+    // GFM renders at most as many cells as the header has, so a body row with
+    // extra cells is not allowed to widen the table.
     if let Some(header) = rows.first() {
+        let columns = header.children().len();
         out.push_str("<thead>\n");
-        render_table_row(header, "th", out, options);
+        render_table_row(header, "th", columns, out, options);
         out.push_str("</thead>\n");
     }
     // A table without a body has no `tbody` at all.
     if rows.len() > 1 {
+        let columns = rows[0].children().len();
         out.push_str("<tbody>\n");
         for row in &rows[1..] {
-            render_table_row(row, "td", out, options);
+            render_table_row(row, "td", columns, out, options);
         }
         out.push_str("</tbody>\n");
     }
@@ -346,9 +350,15 @@ fn render_table(block: &Block, out: &mut String, options: &RenderOptions) {
 }
 
 /// Render one row of a GFM table.
-fn render_table_row(row: &Block, tag: &str, out: &mut String, options: &RenderOptions) {
+fn render_table_row(
+    row: &Block,
+    tag: &str,
+    columns: usize,
+    out: &mut String,
+    options: &RenderOptions,
+) {
     out.push_str("<tr>\n");
-    for cell in row.children() {
+    for cell in row.children().iter().take(columns) {
         let align = cell.align.unwrap_or(Align::None);
         let attribute = match align {
             Align::None => String::new(),

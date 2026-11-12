@@ -89,7 +89,9 @@ fn write_roman(mut value: u64) -> String {
 /// Pandoc's own writer wraps past `z`; any single letter continues an alpha
 /// list, so the wrapped text still reads back as the same list.
 fn write_alpha(value: u64) -> String {
-    let offset = ((value - 1) % 26) as u8;
+    // A constructed list may carry value 0; treat it as the first letter
+    // instead of underflowing.
+    let offset = (value.saturating_sub(1) % 26) as u8;
     ((b'a' + offset) as char).to_string()
 }
 
@@ -403,6 +405,19 @@ mod tests {
         assert_eq!(
             format_list_marker(&marker, MarkerPosition::Continuation),
             "a)"
+        );
+    }
+
+    #[test]
+    fn a_zero_value_does_not_underflow() {
+        let marker = ListMarker {
+            value: 0,
+            style: ListStyle::LowerAlpha,
+            delimiter: ListDelimiter::Dot,
+        };
+        assert_eq!(
+            format_list_marker(&marker, MarkerPosition::Continuation),
+            "a."
         );
     }
 

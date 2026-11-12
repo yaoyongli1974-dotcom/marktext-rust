@@ -208,6 +208,7 @@ MARKTEXT_UPDATE_EXPECTED_FAILURES=1 cargo test -p marktext-core --test spec gfm_
 cargo run -p marktext-cli -- html  README.md
 cargo run -p marktext-cli -- toc   README.md --text
 cargo run -p marktext-cli -- roundtrip README.md
+cargo run -p marktext-cli -- roundtrip README.md --exact
 cargo run -p marktext-cli -- search README.md --query 强调 --context 12
 cargo run -p marktext-cli -- search README.md --regex '^#{1,6} '
 ```
@@ -270,7 +271,5 @@ MARKTEXT_LARGE_DOCUMENT=/path/to/big.md   cargo test -p marktext-app --test larg
 | 嵌套片段里的制表符 | 会被物化成空格，往返不再逐字节一致（收敛性仍成立） |
 | 列表项内多余缩进的规范化 | 序列化器会重排缩进，往返不保证逐字节一致 |
 | 大文档预览的滚动条长度 | 按估算高度计算，与实际内容有少量偏差 |
-| 表格行里超出表头的单元格 | 渲染与序列化都按表头列数截断，源内容会丢失 |
 | 大文档分块的边界 | 两段之间的换行不属于任何 `TextEdit`，无法用退格/删除合并 |
 | 预览里的粗体 | 未注册粗体字族，`**strong**` 与正文同宽 |
-| pandoc 花式列表 | 解析器尚未读取 `fancy_lists`，`A.`/`i.` 仍按段落处理 |

@@ -23,7 +23,8 @@ marktext —— MarkText Rust 引擎命令行工具
     parse <文件>              解析 Markdown，输出状态树 JSON
     html <文件> [--full]      渲染为 HTML（--full 输出完整 HTML 文档）
     toc <文件> [--text]       输出大纲（默认 JSON，--text 输出可读大纲）
-    roundtrip <文件>          校验「解析 → 序列化」与原文是否逐字节一致
+    roundtrip <文件> [--exact] [--out <文件>]
+                              校验往返是否收敛（默认）或逐字节一致（--exact）
     search <文件> <查询>      全文搜索，输出命中位置 JSON
     help                      显示本帮助
     --version                 显示版本号
@@ -204,9 +205,15 @@ fn cmd_toc(args: &[String]) -> Result<(), String> {
 }
 
 /// `roundtrip` — check that a document survives the engine unchanged.
+///
+/// The engine's contract is convergence, not byte identity: the first pass may
+/// normalize table spacing or move reference definitions, but a second pass
+/// must not change anything any more. `--exact` asks for the stricter
+/// byte-for-byte check as well.
 fn cmd_roundtrip(args: &[String]) -> Result<(), String> {
     let mut output_path: Option<String> = None;
     let mut path = None;
+    let mut exact = false;
 
     let mut index = 0;
     while index < args.len() {
@@ -218,6 +225,7 @@ fn cmd_roundtrip(args: &[String]) -> Result<(), String> {
                     .ok_or_else(|| "--out 缺少文件路径".to_string())?;
                 output_path = Some(value.clone());
             }
+            "--exact" => exact = true,
             other if other.starts_with("--") => {
                 return Err(format!("未知选项 `{other}`"));
             }
@@ -242,17 +250,38 @@ fn cmd_roundtrip(args: &[String]) -> Result<(), String> {
         println!("重写结果已写入 {target}");
     }
 
+    // Convergence is the real contract: the normalized output has to be a
+    // fixed point of parse → serialize.
+    let reparsed = parse_document(&output).map_err(|err| format!("重写结果无法解析：{err}"))?;
+    let second = serialize_document(&reparsed, ExportOptions::default());
+    if second != output {
+        println!("往返不收敛：{path}");
+        for difference in describe_differences(&output, &second) {
+            println!("  {difference}");
+        }
+        return Err("往返校验失败".to_string());
+    }
+
     if output == source {
         println!("往返一致：{path}（{} 字节）", source.len());
         return Ok(());
     }
 
-    println!("往返不一致：{path}");
-    println!("  原文 {} 字节，重写后 {} 字节", source.len(), output.len());
-    for difference in describe_differences(&source, &output) {
-        println!("  {difference}");
+    if exact {
+        println!("往返不逐字节一致：{path}");
+        println!("  原文 {} 字节，重写后 {} 字节", source.len(), output.len());
+        for difference in describe_differences(&source, &output) {
+            println!("  {difference}");
+        }
+        return Err("往返校验失败（--exact）".to_string());
     }
-    Err("往返校验失败".to_string())
+
+    println!(
+        "往返收敛：{path}（原文 {} 字节，规范化后 {} 字节；加 --exact 可要求逐字节一致）",
+        source.len(),
+        output.len()
+    );
+    Ok(())
 }
 
 /// Describe the first few line-level differences between two documents.

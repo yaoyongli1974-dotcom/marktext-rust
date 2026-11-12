@@ -142,3 +142,22 @@ fn reference_definitions_survive_the_document_round_trip() {
     let second = serialize_document(&reparsed, ExportOptions::default());
     assert_eq!(second, output);
 }
+
+#[test]
+fn cells_beyond_the_header_survive_serialization_but_not_rendering() {
+    // GFM renders only as many cells as the header has, but the extra cell is
+    // still source text: dropping it would lose data on every save.
+    let source = "| a | b |\n| --- | --- |\n| 1 | 2 | 3 |\n";
+    let document = parse_document(source).expect("valid markdown");
+    let body = document.blocks[0].children()[1].children();
+    assert_eq!(body.len(), 3, "the parser must keep the extra cell");
+
+    let output = serialize_document(&document, ExportOptions::default());
+    assert!(output.contains("| 3 |"), "{output}");
+
+    let reparsed = parse_document(&output).expect("the output must parse again");
+    assert_eq!(reparsed.blocks[0].children()[1].children().len(), 3);
+
+    let html = marktext_core::render_html(&document.blocks, Default::default());
+    assert!(!html.contains(">3<"), "GFM ignores the extra cell: {html}");
+}
