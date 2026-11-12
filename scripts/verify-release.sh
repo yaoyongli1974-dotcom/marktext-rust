@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 下载并校验 v0.1.1 的发布产物。
+# 下载并校验 v0.2.0 的发布产物。
 #
 # 校验两件事：
 #   1. SHA256 与 Release 上的 SHA256SUMS.txt 一致；
 #   2. 包里确实有该有的文件（三个平台的产物、README、LICENSE、NOTICE）。
 set -euo pipefail
 
-TAG="${1:-v0.1.1}"
+TAG="${1:-v0.2.0}"
 REPO="yaoyongli1974-dotcom/marktext-rust"
 WORK="target/release-verify-${TAG}"
 
