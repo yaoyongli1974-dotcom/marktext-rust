@@ -1075,6 +1075,29 @@ fn append_token(
                 format_for(footnote_style, palette),
             );
         }
+        Inline::Superscript { content } | Inline::Subscript { content } => {
+            // egui has no baseline shift, so a script is drawn a little
+            // smaller instead.
+            let script_style = InlineStyle {
+                size: style.size * 0.8,
+                ..style
+            };
+            job.append(content, 0.0, format_for(script_style, palette));
+        }
+        Inline::Insert { content } => {
+            let insert_style = InlineStyle {
+                highlight: true,
+                ..style
+            };
+            job.append(content, 0.0, format_for(insert_style, palette));
+        }
+        Inline::Delete { content } => {
+            let delete_style = InlineStyle {
+                strike: true,
+                ..style
+            };
+            job.append(content, 0.0, format_for(delete_style, palette));
+        }
         Inline::Delim { marker, count, .. } => {
             let raw = marker.to_string().repeat(*count);
             job.append(&raw, 0.0, format_for(style, palette));
@@ -1098,17 +1121,17 @@ fn append_children(
 fn format_for(style: InlineStyle, palette: &Palette) -> TextFormat {
     let font_id = if style.code {
         crate::theme::code_font(style.size)
+    } else if style.bold {
+        crate::theme::bold_font(style.size)
     } else {
         crate::theme::body_font(style.size)
     };
 
-    let mut color = palette.text;
-    if style.link {
-        color = palette.accent;
-    }
-    if style.bold {
-        color = color.gamma_multiply(1.0);
-    }
+    let color = if style.link {
+        palette.accent
+    } else {
+        palette.text
+    };
 
     let mut format = TextFormat {
         font_id,

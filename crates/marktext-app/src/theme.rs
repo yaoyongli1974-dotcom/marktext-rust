@@ -5,9 +5,18 @@
 //! two built-in themes, a light one and a dark one, so the app is usable out
 //! of the box.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, FontTweak};
+
+/// Whether [`install_fonts`] has registered the `bold` family.
+///
+/// A caller that never installs the app fonts (a test, or a library user that
+/// only renders a preview) has no bold family, and asking egui for one would
+/// panic, so [`bold_font`] falls back to the proportional family until the
+/// family exists.
+static BOLD_FAMILY_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// A colour palette used by every panel of the app.
 #[derive(Debug, Clone, Copy)]
@@ -118,12 +127,36 @@ const MONOSPACE_CANDIDATES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The bold fonts the app asks the operating system for.
+///
+/// egui's built-in fonts have no bold face, so strong text and headings would
+/// otherwise be drawn with the same weight as the body. The family falls back
+/// to the proportional family for every glyph the bold font does not cover
+/// (a Latin-only bold font, for example, still leaves Chinese unemphasised).
+const BOLD_FONT_CANDIDATES: &[(&str, &str)] = &[
+    ("C:/Windows/Fonts/msyhbd.ttc", "Microsoft YaHei Bold"),
+    ("C:/Windows/Fonts/arialbd.ttf", "Arial Bold"),
+    (
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "Arial Bold",
+    ),
+    (
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "Noto Sans CJK Bold",
+    ),
+    (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVu Sans Bold",
+    ),
+];
+
 /// Install the fonts the app needs.
 ///
 /// The proportional family gets a system CJK font appended so Chinese text
-/// renders, and the monospace family gets a system monospace font so code
-/// blocks line up. When a font cannot be found the app simply keeps egui's
-/// built-in fonts, which still cover Latin text.
+/// renders, the monospace family gets a system monospace font so code blocks
+/// line up, and a `bold` family is registered so strong text and headings can
+/// be drawn with a bold face. When a font cannot be found the app simply keeps
+/// egui's built-in fonts, which still cover Latin text.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
@@ -157,6 +190,22 @@ pub fn install_fonts(ctx: &egui::Context) {
             list.insert(0, name);
         }
     }
+
+    // The bold family: the system bold font first, then every fallback of the
+    // proportional family, so glyphs the bold font lacks (for example Chinese
+    // in a Latin-only bold face) still render.
+    let mut bold = Vec::new();
+    if let Some((name, data)) = load_first(BOLD_FONT_CANDIDATES) {
+        fonts
+            .font_data
+            .insert(name.clone(), Arc::new(FontData::from_owned(data)));
+        bold.push(name);
+    }
+    if let Some(proportional) = fonts.families.get(&FontFamily::Proportional) {
+        bold.extend(proportional.iter().cloned());
+    }
+    fonts.families.insert(FontFamily::Name("bold".into()), bold);
+    BOLD_FAMILY_INSTALLED.store(true, Ordering::Relaxed);
 
     log(&format!(
         "字体：Proportional 族 = {:?}",
@@ -202,6 +251,18 @@ fn log(message: &str) {
 /// The font id used for the body text.
 pub fn body_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
+}
+
+/// The font id used for bold body text.
+///
+/// The family is always registered by [`install_fonts`]; when no bold font was
+/// found it falls back to the proportional family and looks like normal text.
+pub fn bold_font(size: f32) -> FontId {
+    if BOLD_FAMILY_INSTALLED.load(Ordering::Relaxed) {
+        FontId::new(size, FontFamily::Name("bold".into()))
+    } else {
+        body_font(size)
+    }
 }
 
 /// The font id used for code.

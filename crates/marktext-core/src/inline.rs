@@ -77,6 +77,14 @@ pub enum Inline {
     SoftBreak { raw: String },
     /// A footnote reference.
     Footnote { identifier: String },
+    /// Superscript (`^...^`).
+    Superscript { content: String },
+    /// Subscript (`~...~`).
+    Subscript { content: String },
+    /// Inserted text (`{++...++}`), the inline diff extension.
+    Insert { content: String },
+    /// Deleted text (`{--...--}`), the inline diff extension.
+    Delete { content: String },
     /// A delimiter run that is still waiting to be resolved into emphasis.
     ///
     /// The run lives in the same list as the other tokens so that the
@@ -1078,27 +1086,36 @@ fn parse_script(text: &str, start: usize, marker: char) -> Option<(Inline, usize
     if content.contains(char::is_whitespace) {
         return None;
     }
-    Some((
-        Inline::Text {
-            raw: format!("{marker}{content}{marker}"),
-        },
-        start + end + 2,
-    ))
+    let token = if marker == '^' {
+        Inline::Superscript {
+            content: content.to_string(),
+        }
+    } else {
+        Inline::Subscript {
+            content: content.to_string(),
+        }
+    };
+    Some((token, start + end + 2))
 }
 
-/// Parse a `{++diff++}` span starting at `start`.
+/// Parse a `{++diff++}` or `{--diff--}` span starting at `start`.
 fn parse_inline_diff(text: &str, start: usize) -> Option<(Inline, usize)> {
     let rest = &text[start..];
-    if !rest.starts_with("{++") {
+    let (close, inserted) = if rest.starts_with("{++") {
+        ("++}", true)
+    } else if rest.starts_with("{--") {
+        ("--}", false)
+    } else {
         return None;
-    }
-    let end = rest.find("++}")?;
-    Some((
-        Inline::Text {
-            raw: rest[..end + 3].to_string(),
-        },
-        start + end + 3,
-    ))
+    };
+    let end = rest.find(close)?;
+    let content = rest[3..end].to_string();
+    let token = if inserted {
+        Inline::Insert { content }
+    } else {
+        Inline::Delete { content }
+    };
+    Some((token, start + end + 3))
 }
 
 /// Parse a `~~del~~` or `==mark==` span starting at `start`.
@@ -1905,6 +1922,10 @@ mod tests {
                 Inline::HardBreak { .. } => "hardbreak",
                 Inline::SoftBreak { .. } => "softbreak",
                 Inline::Footnote { .. } => "footnote",
+                Inline::Superscript { .. } => "sup",
+                Inline::Subscript { .. } => "sub",
+                Inline::Insert { .. } => "ins",
+                Inline::Delete { .. } => "delete",
                 Inline::Delim { .. } => "delim",
             })
             .collect()
@@ -1920,6 +1941,28 @@ mod tests {
     fn parses_strong() {
         let tokens = parse("**foo**", InlineOptions::default());
         assert_eq!(kinds(&tokens), vec!["strong"]);
+    }
+
+    #[test]
+    fn parses_superscript_and_subscript() {
+        let tokens = parse("x^2^ H~2~O", InlineOptions::default());
+        assert_eq!(kinds(&tokens), vec!["text", "sup", "text", "sub", "text"]);
+    }
+
+    #[test]
+    fn parses_both_directions_of_an_inline_diff() {
+        let tokens = parse("{++new++} {--old--}", InlineOptions::default());
+        assert_eq!(kinds(&tokens), vec!["ins", "text", "delete"]);
+    }
+
+    #[test]
+    fn scripts_are_off_when_the_option_is_off() {
+        let options = InlineOptions {
+            super_sub_script: false,
+            ..InlineOptions::default()
+        };
+        let tokens = parse("x^2^ H~2~O", options);
+        assert_eq!(kinds(&tokens), vec!["text"]);
     }
 
     #[test]

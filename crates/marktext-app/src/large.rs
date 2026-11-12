@@ -62,6 +62,9 @@ impl DocumentScale {
 #[derive(Debug, Clone, Default)]
 pub struct SourceChunks {
     pieces: Vec<String>,
+    /// The measured height of every piece and the width it was measured at.
+    heights: Vec<f32>,
+    heights_width: f32,
 }
 
 impl SourceChunks {
@@ -69,7 +72,10 @@ impl SourceChunks {
     pub fn new(source: &str) -> SourceChunks {
         let mut pieces = Vec::new();
         if source.is_empty() {
-            return SourceChunks { pieces };
+            return SourceChunks {
+                pieces,
+                ..Default::default()
+            };
         }
 
         let mut current = String::new();
@@ -88,7 +94,10 @@ impl SourceChunks {
         if lines > 0 {
             pieces.push(current);
         }
-        SourceChunks { pieces }
+        SourceChunks {
+            pieces,
+            ..Default::default()
+        }
     }
 
     /// The chunks of the source.
@@ -104,6 +113,42 @@ impl SourceChunks {
     /// The source the chunks stand for.
     pub fn source(&self) -> String {
         self.pieces.join("\n")
+    }
+
+    /// The height of every chunk at `width`, measured with the editor's font.
+    ///
+    /// A chunk is laid out whole, exactly as the `TextEdit` will lay it out,
+    /// so long lines that wrap are counted too. Measuring is only redone when
+    /// the width or a piece changed.
+    fn measured_heights(&mut self, ui: &egui::Ui, width: f32) -> &[f32] {
+        let font = crate::theme::body_font(14.0);
+        let color = ui.visuals().text_color();
+        if self.heights.len() != self.pieces.len() || (self.heights_width - width).abs() > 0.5 {
+            let row_height = ui.fonts(|fonts| fonts.row_height(&font));
+            self.heights = self
+                .pieces
+                .iter()
+                .map(|piece| {
+                    if piece.is_empty() {
+                        return row_height + 8.0;
+                    }
+                    let height = ui.fonts(|fonts| {
+                        fonts
+                            .layout(piece.clone(), font.clone(), color, width)
+                            .size()
+                            .y
+                    });
+                    height + 8.0
+                })
+                .collect();
+            self.heights_width = width;
+        }
+        &self.heights
+    }
+
+    /// Forget the measured heights because a piece changed.
+    fn invalidate_heights(&mut self) {
+        self.heights.clear();
     }
 
     /// The line at which every chunk starts.
@@ -152,11 +197,13 @@ pub fn draw_chunks(ui: &mut egui::Ui, chunks: &mut SourceChunks) -> ChunkEdit {
         .show(ui, |ui| {
             let width = ui.available_width();
             let offsets = chunks.line_offsets();
-            let heights: Vec<f32> = chunks
-                .pieces()
-                .iter()
-                .map(|piece| count_lines(piece) as f32 * row_height + 8.0)
-                .collect();
+            // The TextEdit wraps at the width of its rect, so the height has to
+            // come from the wrapped layout; counting hard lines only made
+            // following chunks overlap as soon as one line was wider than the
+            // pane.
+            let heights = chunks
+                .measured_heights(ui, (width - 4.0).max(24.0))
+                .to_vec();
             let total: f32 = heights.iter().sum();
             // The room the whole source takes up, so that the scroll bar knows
             // how far it reaches.
@@ -207,6 +254,7 @@ pub fn draw_chunks(ui: &mut egui::Ui, chunks: &mut SourceChunks) -> ChunkEdit {
                         .show(ui);
                     if output.response.changed() {
                         edit.changed = true;
+                        chunks.invalidate_heights();
                     }
                     if let Some(range) = output.cursor_range {
                         edit.cursor = Some((index, start_line, range.primary.index));

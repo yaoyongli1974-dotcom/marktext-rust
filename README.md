@@ -272,4 +272,3 @@ MARKTEXT_LARGE_DOCUMENT=/path/to/big.md   cargo test -p marktext-app --test larg
 | 列表项内多余缩进的规范化 | 序列化器会重排缩进，往返不保证逐字节一致 |
 | 大文档预览的滚动条长度 | 按估算高度计算，与实际内容有少量偏差 |
 | 大文档分块的边界 | 两段之间的换行不属于任何 `TextEdit`，无法用退格/删除合并 |
-| 预览里的粗体 | 未注册粗体字族，`**strong**` 与正文同宽 |

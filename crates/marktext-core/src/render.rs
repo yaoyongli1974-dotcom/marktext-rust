@@ -571,6 +571,26 @@ fn render_inline_token(token: &Inline, out: &mut String, options: &RenderOptions
                 "<sup class=\"footnote-ref\"><a href=\"#fn-{identifier}\" id=\"fnref-{identifier}\">{identifier}</a></sup>"
             ));
         }
+        Inline::Superscript { content } => {
+            out.push_str("<sup>");
+            escape_html(content, out);
+            out.push_str("</sup>");
+        }
+        Inline::Subscript { content } => {
+            out.push_str("<sub>");
+            escape_html(content, out);
+            out.push_str("</sub>");
+        }
+        Inline::Insert { content } => {
+            out.push_str("<ins>");
+            escape_html(content, out);
+            out.push_str("</ins>");
+        }
+        Inline::Delete { content } => {
+            out.push_str("<del>");
+            escape_html(content, out);
+            out.push_str("</del>");
+        }
         Inline::Delim { marker, count, .. } => {
             for _ in 0..*count {
                 out.push(*marker);

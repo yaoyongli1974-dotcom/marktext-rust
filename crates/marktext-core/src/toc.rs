@@ -145,6 +145,10 @@ fn push_plain_text(token: &Inline, out: &mut String) {
         | Inline::HardBreak { .. }
         | Inline::SoftBreak { .. } => {}
         Inline::Footnote { identifier } => out.push_str(identifier),
+        Inline::Superscript { content }
+        | Inline::Subscript { content }
+        | Inline::Insert { content }
+        | Inline::Delete { content } => out.push_str(content),
         Inline::Delim { marker, count, .. } => {
             for _ in 0..*count {
                 out.push(*marker);
