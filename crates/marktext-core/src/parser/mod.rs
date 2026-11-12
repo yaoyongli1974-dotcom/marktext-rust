@@ -226,7 +226,11 @@ struct BlockParser<'a> {
 /// `>` markers overflows the stack and aborts the process (the release profile
 /// uses `panic = "abort"`). Deeper content is kept as a paragraph instead, so
 /// the text is not lost.
-const MAX_NESTING: usize = 100;
+///
+/// The limit has to leave room for the debug-build frames on the smallest
+/// stack the code runs on, which is the Windows test worker: at 100 levels it
+/// still overflowed there, so 32 leaves a wide margin.
+const MAX_NESTING: usize = 32;
 
 /// Expand tabs to the next multiple of four, as CommonMark requires.
 ///
