@@ -182,8 +182,17 @@ fn match_url(text: &str, index: usize) -> Option<usize> {
 /// The result is the offset behind the link.
 fn match_email(text: &str, index: usize) -> Option<usize> {
     let bytes = text.as_bytes();
+    // RFC 5321 limits the local part to 64 characters. Stopping there also
+    // keeps the scan cheap: the local part allows `*`, `_` and other
+    // punctuation, so without a limit a document full of `*a*` would make
+    // every `a` scan to the end of the file looking for an `@` that is not
+    // there, which is quadratic.
+    const MAX_LOCAL_PART: usize = 64;
     let mut cursor = index;
-    while cursor < bytes.len() && is_local_part_byte(bytes[cursor]) {
+    while cursor < bytes.len()
+        && cursor - index < MAX_LOCAL_PART
+        && is_local_part_byte(bytes[cursor])
+    {
         cursor += 1;
     }
     if cursor == index || bytes.get(cursor) != Some(&b'@') {

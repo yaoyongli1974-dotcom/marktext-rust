@@ -520,7 +520,6 @@ fn scan(text: &str, options: InlineOptions) -> Vec<Inline> {
     }
 
     flush_text!(text.len());
-    resolve_emphasis(&mut tokens);
     tokens
 }
 
@@ -1688,6 +1687,43 @@ fn may_pair(opener: &Delimiter, closer: &Delimiter) -> bool {
     (opener.length + closer.length) % 3 != 0
 }
 
+/// A node of the token list the emphasis pass builds.
+///
+/// The tokens are kept in a linked list instead of a `Vec` so that wrapping a
+/// range in an emphasis token never shifts the tokens behind it. Splicing a
+/// `Vec` for every pair made a line of `*a*` repeated thousands of times
+/// quadratic; walking a linked list makes the whole pass linear in the number
+/// of tokens.
+struct TokenNode {
+    /// The token, or `None` once it has moved into an emphasis node.
+    token: Option<Inline>,
+    /// The node before this one in the list.
+    previous: Option<usize>,
+    /// The node after this one in the list.
+    next: Option<usize>,
+}
+
+/// Append a token to a linked list of nodes that is being built.
+fn push_node(
+    nodes: &mut Vec<TokenNode>,
+    first: &mut Option<usize>,
+    last: &mut Option<usize>,
+    token: Inline,
+) -> usize {
+    let index = nodes.len();
+    nodes.push(TokenNode {
+        token: Some(token),
+        previous: *last,
+        next: None,
+    });
+    match *last {
+        Some(previous) => nodes[previous].next = Some(index),
+        None => *first = Some(index),
+    }
+    *last = Some(index);
+    index
+}
+
 /// Resolve emphasis with CommonMark's delimiter-stack algorithm.
 ///
 /// The scan emits one placeholder token per delimiter run.  This pass walks
@@ -1697,14 +1733,15 @@ fn may_pair(opener: &Delimiter, closer: &Delimiter) -> bool {
 /// emphasis or strong token, and the runs that are left over keep their
 /// place in front of and behind the new token.
 fn resolve_emphasis(tokens: &mut Vec<Inline>) {
+    let mut nodes: Vec<TokenNode> = Vec::with_capacity(tokens.len());
     let mut delims: Vec<Delimiter> = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
+    for (index, token) in std::mem::take(tokens).into_iter().enumerate() {
         if let Inline::Delim {
             marker,
             count,
             can_open,
             can_close,
-        } = token
+        } = &token
         {
             delims.push(Delimiter {
                 marker: *marker,
@@ -1717,7 +1754,16 @@ fn resolve_emphasis(tokens: &mut Vec<Inline>) {
                 next: None,
             });
         }
+        nodes.push(TokenNode {
+            token: Some(token),
+            previous: index.checked_sub(1),
+            next: None,
+        });
     }
+    for index in 0..nodes.len().saturating_sub(1) {
+        nodes[index].next = Some(index + 1);
+    }
+    let mut head = if nodes.is_empty() { None } else { Some(0) };
     for index in 1..delims.len() {
         delims[index].previous = Some(index - 1);
         delims[index - 1].next = Some(index);
@@ -1728,6 +1774,11 @@ fn resolve_emphasis(tokens: &mut Vec<Inline>) {
     } else {
         Some(0usize)
     };
+    // For every marker and closer category, the highest delimiter index below
+    // which no opener can match was already ruled out. Without this bound a
+    // document with many closers and no opener scans the whole stack for every
+    // one of them, which is quadratic.
+    let mut openers_bottom: [[Option<usize>; 6]; 2] = [[None; 6]; 2];
     while let Some(index) = closer {
         if !delims[index].can_close() {
             closer = delims[index].next;
@@ -1735,9 +1786,15 @@ fn resolve_emphasis(tokens: &mut Vec<Inline>) {
         }
 
         // Look back for the nearest opener that can match this closer.
+        let slot = if delims[index].marker == '*' { 0 } else { 1 };
+        let category = (delims[index].can_open as usize) * 3 + delims[index].length % 3;
+        let bottom = openers_bottom[slot][category];
         let mut opener = None;
         let mut candidate = delims[index].previous;
         while let Some(candidate_index) = candidate {
+            if bottom.is_some_and(|bound| candidate_index <= bound) {
+                break;
+            }
             let delim = &delims[candidate_index];
             if delim.can_open()
                 && delim.marker == delims[index].marker
@@ -1750,13 +1807,31 @@ fn resolve_emphasis(tokens: &mut Vec<Inline>) {
         }
 
         let Some(opener_index) = opener else {
-            // Without an opener the run stays literal text.
+            // No opener exists below this closer for this category. A closer
+            // that cannot open is useless to later closers as well, so the
+            // bound can include it; one that can open stays available.
+            openers_bottom[slot][category] = if delims[index].can_open {
+                delims[index].previous
+            } else {
+                Some(index)
+            };
             closer = delims[index].next;
             continue;
         };
 
-        closer = insert_emphasis(tokens, &mut delims, opener_index, index);
+        closer = insert_emphasis(&mut nodes, &mut head, &mut delims, opener_index, index);
     }
+
+    let mut result = Vec::with_capacity(nodes.len());
+    let mut cursor = head;
+    while let Some(index) = cursor {
+        let next = nodes[index].next;
+        if let Some(token) = nodes[index].token.take() {
+            result.push(token);
+        }
+        cursor = next;
+    }
+    *tokens = result;
 }
 
 /// Pair an opener with a closer and turn the text between them into an
@@ -1765,7 +1840,8 @@ fn resolve_emphasis(tokens: &mut Vec<Inline>) {
 /// The function returns the closer that has to be looked at next: the closer
 /// itself when it still holds delimiters, the one behind it otherwise.
 fn insert_emphasis(
-    tokens: &mut Vec<Inline>,
+    nodes: &mut Vec<TokenNode>,
+    head: &mut Option<usize>,
     delims: &mut [Delimiter],
     opener: usize,
     closer: usize,
@@ -1780,11 +1856,24 @@ fn insert_emphasis(
     delims[opener].remaining -= use_delims;
     delims[closer].remaining -= use_delims;
 
-    let opener_token = delims[opener].token;
-    let closer_token = delims[closer].token;
+    let opener_node = delims[opener].token;
+    let closer_node = delims[closer].token;
 
-    // The content between the two runs becomes the content of the emphasis.
-    let children: Vec<Inline> = tokens[opener_token + 1..closer_token].to_vec();
+    // The tokens between the two runs become the content of the emphasis.
+    let before = nodes[opener_node].previous;
+    let after = nodes[closer_node].next;
+    let mut children: Vec<Inline> = Vec::new();
+    let mut cursor = nodes[opener_node].next;
+    while let Some(index) = cursor {
+        if index == closer_node {
+            break;
+        }
+        cursor = nodes[index].next;
+        if let Some(token) = nodes[index].token.take() {
+            children.push(token);
+        }
+    }
+
     let marker = delims[closer].marker;
     let node = if use_delims == 2 {
         Inline::Strong { marker, children }
@@ -1794,33 +1883,58 @@ fn insert_emphasis(
 
     // The delimiters that are left over keep their place in front of and
     // behind the new emphasis.
-    let mut replacement: Vec<Inline> = Vec::with_capacity(3);
+    let mut first_new = None;
+    let mut last_new = None;
+    let mut opener_token_node = None;
+    let mut closer_token_node = None;
     if delims[opener].remaining > 0 {
-        replacement.push(Inline::Delim {
-            marker: delims[opener].marker,
-            count: delims[opener].remaining,
-            can_open: delims[opener].can_open,
-            can_close: delims[opener].can_close,
-        });
+        opener_token_node = Some(push_node(
+            nodes,
+            &mut first_new,
+            &mut last_new,
+            Inline::Delim {
+                marker: delims[opener].marker,
+                count: delims[opener].remaining,
+                can_open: delims[opener].can_open,
+                can_close: delims[opener].can_close,
+            },
+        ));
     }
-    replacement.push(node);
+    push_node(nodes, &mut first_new, &mut last_new, node);
     if delims[closer].remaining > 0 {
-        replacement.push(Inline::Delim {
-            marker: delims[closer].marker,
-            count: delims[closer].remaining,
-            can_open: delims[closer].can_open,
-            can_close: delims[closer].can_close,
-        });
+        closer_token_node = Some(push_node(
+            nodes,
+            &mut first_new,
+            &mut last_new,
+            Inline::Delim {
+                marker: delims[closer].marker,
+                count: delims[closer].remaining,
+                can_open: delims[closer].can_open,
+                can_close: delims[closer].can_close,
+            },
+        ));
     }
 
-    // Replace the two runs and the content between them.
-    let removed = closer_token - opener_token + 1;
-    tokens.splice(opener_token..=closer_token, replacement.iter().cloned());
-    let shift = replacement.len() as isize - removed as isize;
-    for delim in delims.iter_mut() {
-        if delim.token > closer_token {
-            delim.token = (delim.token as isize + shift) as usize;
+    // Link the replacement where the opener used to be and drop the whole old
+    // range. The nodes in it stay allocated but become unreachable; their
+    // tokens have already moved into `children`.
+    if let Some(first) = first_new {
+        nodes[first].previous = before;
+        match before {
+            Some(previous) => nodes[previous].next = Some(first),
+            None => *head = Some(first),
         }
+        let last = last_new.expect("the emphasis itself is always a node");
+        nodes[last].next = after;
+        if let Some(next) = after {
+            nodes[next].previous = Some(last);
+        }
+    }
+    if let Some(index) = opener_token_node {
+        delims[opener].token = index;
+    }
+    if let Some(index) = closer_token_node {
+        delims[closer].token = index;
     }
 
     // The delimiters that lie between the two runs become part of the
@@ -1844,7 +1958,6 @@ fn insert_emphasis(
         remove_delimiter(delims, closer);
         next
     } else {
-        delims[closer].token = opener_token + replacement.len() - 1;
         Some(closer)
     }
 }
@@ -1962,6 +2075,15 @@ mod tests {
             ..InlineOptions::default()
         };
         let tokens = parse("x^2^ H~2~O", options);
+        assert_eq!(kinds(&tokens), vec!["text"]);
+    }
+
+    #[test]
+    fn many_unmatched_delimiters_stay_text() {
+        // Openers of one marker followed by closers of another: the old
+        // backward search walked the whole delimiter stack for every closer.
+        let text = "*a ".repeat(1_000) + &"b_ ".repeat(1_000);
+        let tokens = parse(&text, InlineOptions::default());
         assert_eq!(kinds(&tokens), vec!["text"]);
     }
 

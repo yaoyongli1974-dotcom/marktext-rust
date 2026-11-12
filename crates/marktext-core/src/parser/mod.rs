@@ -161,6 +161,21 @@ impl FragmentLine {
     }
 }
 
+/// View a fragment line as a line of the parser.
+///
+/// The fragment owns its text; the returned line borrows it for the duration
+/// of the call, which is enough to ask [`line_starts_block`] about it.
+fn line_of_fragment(fragment: &FragmentLine) -> Line<'_> {
+    let trimmed = fragment.text.trim_start_matches([' ', '\t']);
+    let indent = &fragment.text[..fragment.text.len() - trimmed.len()];
+    Line {
+        raw: &fragment.text,
+        content: trimmed,
+        width: tab_to_columns(indent, fragment.base),
+        base: fragment.base,
+    }
+}
+
 /// Remove the marker of a block quote from a line.
 ///
 /// The marker is the `>` together with the single column of whitespace that
@@ -765,9 +780,29 @@ impl<'a> BlockParser<'a> {
         // specification — and when the line does not start a block of its
         // own.
         let mut inner_lines: Vec<FragmentLine> = Vec::new();
+        // Whether the fragment so far ends with a paragraph, which is what
+        // allows a lazy continuation. `None` means "not known yet"; the probe
+        // is only run when a line without `>` arrives, and a run of lazy
+        // lines reuses the answer because a plain line cannot end the
+        // paragraph it continues.
+        let mut ends_with_paragraph: Option<bool> = None;
         while let Some(line) = self.next_line() {
             if line.content.starts_with('>') {
-                inner_lines.push(strip_quote_marker(&line));
+                let stripped = strip_quote_marker(&line);
+                if ends_with_paragraph == Some(true) {
+                    // A marked line that is ordinary paragraph text keeps the
+                    // paragraph going. Anything else (a blank line, a block
+                    // start or a setext underline) may change the last block,
+                    // so the next probe has to look again.
+                    let fragment_line = line_of_fragment(&stripped);
+                    let keeps_paragraph = !fragment_line.content.is_empty()
+                        && !is_setext_underline(fragment_line.content)
+                        && !line_starts_block(&fragment_line, true, self.options.fancy_lists);
+                    if !keeps_paragraph {
+                        ends_with_paragraph = None;
+                    }
+                }
+                inner_lines.push(stripped);
                 continue;
             }
             if line.content.is_empty() {
@@ -777,11 +812,16 @@ impl<'a> BlockParser<'a> {
             }
             // The probe tells whether the quote ends with a paragraph: only a
             // paragraph may be continued by a line that carries no `>` marker.
-            let ends_with_paragraph = {
+            // Parsing the whole fragment per lazy line is quadratic, so the
+            // answer is cached; consecutive lazy lines all continue the same
+            // paragraph.
+            if ends_with_paragraph.is_none() {
                 let probe = self.parse_probe_blocks(inner_lines.clone());
-                innermost_block_is_paragraph(&probe)
-            };
-            if !ends_with_paragraph || line_starts_block(&line, true, self.options.fancy_lists) {
+                ends_with_paragraph = Some(innermost_block_is_paragraph(&probe));
+            }
+            if ends_with_paragraph != Some(true)
+                || line_starts_block(&line, true, self.options.fancy_lists)
+            {
                 self.pos -= 1;
                 break;
             }
@@ -2548,6 +2588,51 @@ mod tests {
         assert_eq!(kinds(&blocks), vec![BlockKind::BlockQuote]);
         assert_eq!(blocks[0].children().len(), 1);
         assert_eq!(blocks[0].children()[0].text(), "quoted\nmore");
+    }
+
+    #[test]
+    fn a_lazy_line_continues_a_quote_paragraph() {
+        let blocks = parse("> quoted\nlazy\n").unwrap();
+        assert_eq!(kinds(&blocks), vec![BlockKind::BlockQuote]);
+        assert_eq!(blocks[0].children()[0].text(), "quoted\nlazy");
+    }
+
+    #[test]
+    fn a_lazy_line_does_not_extend_a_heading_in_a_quote() {
+        let blocks = parse("> # heading\nlazy\n").unwrap();
+        assert_eq!(
+            kinds(&blocks),
+            vec![BlockKind::BlockQuote, BlockKind::Paragraph]
+        );
+        assert_eq!(kinds(blocks[0].children()), vec![BlockKind::AtxHeading]);
+        assert_eq!(blocks[1].text(), "lazy");
+    }
+
+    #[test]
+    fn a_lazy_line_does_not_extend_a_fence_in_a_quote() {
+        let blocks = parse("> ```\n> code\n> ```\nlazy\n").unwrap();
+        assert_eq!(
+            kinds(&blocks),
+            vec![BlockKind::BlockQuote, BlockKind::Paragraph]
+        );
+        assert_eq!(kinds(blocks[0].children()), vec![BlockKind::CodeBlock]);
+        assert_eq!(blocks[1].text(), "lazy");
+    }
+
+    #[test]
+    fn a_long_run_of_lazy_lines_stays_one_paragraph() {
+        // The probe that decides whether a lazy line may continue the quote
+        // used to re-parse the whole quote for every line, which is quadratic.
+        let mut source = String::from("> quoted\n");
+        for index in 0..5_000 {
+            source.push_str(&format!("lazy {index}\n"));
+        }
+        let blocks = parse(&source).unwrap();
+        assert_eq!(kinds(&blocks), vec![BlockKind::BlockQuote]);
+        let paragraph = &blocks[0].children()[0];
+        assert_eq!(paragraph.kind, BlockKind::Paragraph);
+        assert!(paragraph.text().starts_with("quoted\nlazy 0\n"));
+        assert!(paragraph.text().ends_with("lazy 4999"));
     }
 
     #[test]
